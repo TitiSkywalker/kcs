@@ -1,0 +1,973 @@
+"""ClusterService — business logic for cluster management + utility functions."""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import yaml
+
+from kcs.config import get_registry, is_built_image, load, save, set_cluster_registry
+from kcs.k8s import KCSClient
+from kcs.server.models import ClusterConfig, WorkerNode
+
+log = logging.getLogger("kcs")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Module-level singleton
+# ══════════════════════════════════════════════════════════════════════════════
+
+_service: ClusterService | None = None
+
+
+def get_service() -> ClusterService:
+    global _service
+    if _service is None:
+        _service = ClusterService()
+    return _service
+
+
+def set_service_config(config: ClusterConfig) -> None:
+    get_service().cluster_config = config
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Utility functions
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def find_free_port(start: int = 5001) -> int:
+    port = start
+    while port < 5100:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+        port += 1
+    return start
+
+
+def resolve_image(image: str) -> str:
+    if "/" in image and ":" in image.rsplit("/", 1)[-1]:
+        return image
+    if is_built_image(image):
+        reg = get_registry()
+        if reg:
+            return f"{reg['host']}:{reg['internal_port']}/{image}"
+        return f"registry.kcs-system.svc.cluster.local:5000/{image}"
+    return image
+
+
+def build_ssh_cmd(
+    target: str, remote_cmd: str, use_sshpass: bool, with_tty: bool
+) -> list[str]:
+    if use_sshpass:
+        cmd = [
+            "sshpass",
+            "-e",
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=10",
+        ]
+    else:
+        cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=10",
+        ]
+        if with_tty:
+            cmd.append("-t")
+    cmd.extend([target, remote_cmd])
+    return cmd
+
+
+def get_server_ip_from_kubeconfig() -> str | None:
+    kubeconfig = os.environ.get("KUBECONFIG") or str(Path.home() / ".kcs" / "k3s.yaml")
+    if not os.path.exists(kubeconfig):
+        kubeconfig = "/etc/rancher/k3s/k3s.yaml"
+    try:
+        with open(kubeconfig) as f:
+            cfg = yaml.safe_load(f)
+        for c in cfg.get("clusters", []):
+            server_url = c["cluster"]["server"]
+            m = re.search(r"https?://([^:]+)", server_url)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def read_k3s_token(sudo_password: str | None = None) -> str | None:
+    token_path = "/var/lib/rancher/k3s/server/token"
+    if not os.path.exists(token_path):
+        return None
+    try:
+        with open(token_path) as f:
+            return f.read().strip()
+    except PermissionError:
+        pass
+    try:
+        if sudo_password:
+            result = subprocess.run(
+                ["sudo", "-S", "-p", "", "cat", token_path],
+                input=sudo_password + "\n",
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+        else:
+            result = subprocess.run(
+                ["sudo", "-n", "cat", token_path],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def configure_containerd_insecure(registry_ip: str) -> None:
+    registries_yaml = f"""mirrors:
+  "{registry_ip}:5000":
+    endpoint:
+      - "http://{registry_ip}:5000"
+configs:
+  "{registry_ip}:5000":
+    tls:
+      insecure_skip_verify: true
+"""
+    registries_path = "/etc/rancher/k3s/registries.yaml"
+    try:
+        subprocess.run(
+            ["sudo", "tee", registries_path],
+            input=registries_yaml,
+            text=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["sudo", "systemctl", "restart", "k3s", "k3s-agent"],
+            capture_output=True,
+            timeout=30,
+        )
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ClusterService
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class ClusterService:
+    """Manages cluster lifecycle: config, repair, NFS, workers."""
+
+    def __init__(self, cluster_config: ClusterConfig | None = None):
+        self.cluster_config = cluster_config
+
+    # ── Client ──────────────────────────────────────────────────────────────
+
+    def get_client(self) -> KCSClient:
+        return KCSClient(kubeconfig=self.get_kubeconfig_path())
+
+    def get_kubeconfig_path(self) -> str:
+        kubeconfig = os.environ.get("KUBECONFIG")
+        if kubeconfig:
+            return kubeconfig
+        k3s_dst = str(Path.home() / ".kcs" / "k3s.yaml")
+        if os.path.exists(k3s_dst):
+            return k3s_dst
+        return "/etc/rancher/k3s/k3s.yaml"
+
+    # ── Config ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def load_config_file(path: str) -> ClusterConfig:
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+
+        suffix = p.suffix.lower()
+        if suffix in (".toml", ".tml"):
+            import tomllib
+
+            with open(path, "rb") as f:
+                raw = tomllib.load(f)
+        elif suffix in (".yaml", ".yml"):
+            with open(path) as f:
+                raw = yaml.safe_load(f)
+        else:
+            raise ValueError(
+                f"Unsupported config format: {suffix} (use .toml or .yaml)"
+            )
+
+        workers = [WorkerNode(**w) for w in raw.get("workers", [])]
+        return ClusterConfig(
+            backend=raw.get("backend", "k3s"),
+            sudo_password=raw.get("sudo_password"),
+            workers=workers,
+        )
+
+    # ── Registry ────────────────────────────────────────────────────────────
+
+    def _ensure_registry(self) -> dict | None:
+        kubeconfig = self.get_kubeconfig_path()
+        check = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "deployment",
+                "registry",
+                "-n",
+                "kcs-system",
+                "-o",
+                "jsonpath={.status.readyReplicas}",
+                "--kubeconfig",
+                kubeconfig,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if check.stdout.strip() != "1":
+            registry_yaml = """apiVersion: v1
+kind: Namespace
+metadata:
+  name: kcs-system
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry
+  namespace: kcs-system
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: kcs-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      containers:
+      - name: registry
+        image: registry:2
+        ports:
+        - containerPort: 5000
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/registry
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: kcs-system
+spec:
+  type: NodePort
+  ports:
+  - port: 5000
+    targetPort: 5000
+    nodePort: 30500
+  selector:
+    app: registry
+"""
+            result = subprocess.run(
+                ["kubectl", "apply", "--kubeconfig", kubeconfig, "-f", "-"],
+                input=registry_yaml,
+                text=True,
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                return None
+            subprocess.run(
+                [
+                    "kubectl",
+                    "wait",
+                    "--for=condition=available",
+                    "deployment/registry",
+                    "-n",
+                    "kcs-system",
+                    "--kubeconfig",
+                    kubeconfig,
+                    "--timeout=60s",
+                ],
+                capture_output=True,
+            )
+
+        ip_result = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "svc",
+                "registry",
+                "-n",
+                "kcs-system",
+                "--kubeconfig",
+                kubeconfig,
+                "-o",
+                "jsonpath={.spec.clusterIP}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        cluster_ip = ip_result.stdout.strip()
+        if not cluster_ip:
+            return None
+
+        reg_info = {
+            "host": cluster_ip,
+            "internal_port": "5000",
+            "external_port": "30500",
+        }
+        set_cluster_registry(**reg_info)
+        configure_containerd_insecure(cluster_ip)
+        return reg_info
+
+    def _push_to_registry(self, tag: str, reg: dict) -> None:
+        kubeconfig = self.get_kubeconfig_path()
+        local_port = find_free_port(30500)
+        host_tag = f"localhost:{local_port}/{tag}"
+
+        pf = subprocess.Popen(
+            [
+                "kubectl",
+                "port-forward",
+                "svc/registry",
+                f"{local_port}:5000",
+                "-n",
+                "kcs-system",
+                "--kubeconfig",
+                kubeconfig,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(10):
+            time.sleep(0.5)
+            check = subprocess.run(
+                ["curl", "-s", f"http://localhost:{local_port}/v2/"],
+                capture_output=True,
+            )
+            if check.returncode == 0:
+                break
+        try:
+            subprocess.run(["docker", "tag", tag, host_tag], capture_output=True)
+            subprocess.run(
+                ["docker", "push", host_tag], capture_output=True, timeout=60
+            )
+        finally:
+            pf.terminate()
+
+    # ── Workers ─────────────────────────────────────────────────────────────
+
+    def _prune_stale_workers(
+        self, config: ClusterConfig, configured_hostnames: set[str]
+    ) -> list[str]:
+        results = []
+        try:
+            client = self.get_client()
+            nodes = client.list_nodes()
+        except Exception:
+            return results
+
+        for n in nodes:
+            if "control-plane" in n["roles"] or "master" in n["roles"]:
+                continue
+            if n["name"] in configured_hostnames:
+                continue
+            log.info("Pruning stale worker: %s (%s)", n["name"], n["ip"])
+            try:
+                client.core_v1.delete_node(name=n["name"])
+                results.append(f"Removed stale worker: {n['name']}")
+            except Exception as e:
+                results.append(f"Failed to remove {n['name']}: {e}")
+
+        return results
+
+    # ── Apply config ────────────────────────────────────────────────────────
+
+    def apply_config(self) -> list[str]:
+        """Apply cluster config: ensure backend, join workers, prune stale."""
+        config = self.cluster_config
+        if not config:
+            return ["No config loaded"]
+
+        results = []
+
+        # 1. Ensure backend
+        if config.backend == "k3s":
+            k3s_src = "/etc/rancher/k3s/k3s.yaml"
+            if not os.path.exists(k3s_src):
+                log.warning("Host k3s not installed")
+                results.append("WARNING: host k3s not installed")
+            else:
+                k3s_dst = str(Path.home() / ".kcs" / "k3s.yaml")
+                if not os.path.exists(k3s_dst):
+                    shutil.copy(k3s_src, k3s_dst)
+                    log.info("Copied k3s.yaml to %s", k3s_dst)
+                cfg = load()
+                cfg["current_cluster"] = None
+                save(cfg)
+                log.info("Backend set to host k3s")
+                results.append("Backend: k3s (host)")
+        # 2. Join workers
+        if not config.workers:
+            self._prune_stale_workers(config, set())
+            return results
+
+        server_ip = None
+        try:
+            result = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
+            for ip in result.stdout.strip().split():
+                if not ip.startswith(("127.", "10.", "172.")):
+                    server_ip = ip
+                    break
+        except Exception:
+            pass
+        if not server_ip:
+            server_ip = get_server_ip_from_kubeconfig()
+        if not server_ip:
+            log.warning("Cannot detect server IP")
+            results.append("WARNING: Cannot detect server IP, worker join will fail")
+        else:
+            log.info("Server IP: %s", server_ip)
+
+        k3s_token = read_k3s_token(config.sudo_password)
+        if not k3s_token:
+            log.warning("Cannot read k3s token")
+            results.append("WARNING: Cannot read k3s token, worker join will fail")
+        else:
+            log.info("K3S_TOKEN: %s...", k3s_token[:8])
+
+        if not server_ip or not k3s_token:
+            return results
+
+        sshpass_bin = shutil.which("sshpass")
+        log.info("sshpass: %s", "found" if sshpass_bin else "not found")
+
+        configured_hostnames: set[str] = set()
+
+        reg = get_registry()
+        registry_cfg = ""
+        if reg:
+            reg_ip = reg["host"]
+            registry_cfg = (
+                f"sudo mkdir -p /etc/rancher/k3s && "
+                f"cat << 'KCS_REG_EOF' | sudo tee /etc/rancher/k3s/registries.yaml > /dev/null\n"
+                f"mirrors:\n"
+                f'  "{reg_ip}:5000":\n'
+                f"    endpoint:\n"
+                f'      - "http://{reg_ip}:5000"\n'
+                f"KCS_REG_EOF\n"
+            )
+
+        for w in config.workers:
+            target = f"{w.user}@{w.host}"
+            env = os.environ.copy()
+            if sshpass_bin:
+                env["SSHPASS"] = w.password
+
+            need_sudo = w.user != "root"
+
+            log.info("Checking %s ...", target)
+            try:
+                hn = subprocess.run(
+                    build_ssh_cmd(target, "hostname", sshpass_bin is not None, False),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                remote_hostname = hn.stdout.strip() if hn.returncode == 0 else w.host
+                log.info("Remote hostname: %s", remote_hostname)
+            except Exception as e:
+                log.warning("Failed to check %s: %s", target, e)
+                remote_hostname = w.host
+
+            client = self.get_client()
+            try:
+                existing = client.core_v1.list_node(
+                    field_selector=f"metadata.name={remote_hostname}"
+                )
+                already_joined = bool(existing.items)
+            except Exception:
+                already_joined = False
+
+            if already_joined:
+                log.info("Node %s already in cluster", remote_hostname)
+                if registry_cfg:
+                    sync_cmd = (
+                        f"sudo -S -p '' sh -c '{registry_cfg}'"
+                        if (need_sudo and sshpass_bin)
+                        else (
+                            f"sudo sh -c '{registry_cfg}'"
+                            if need_sudo
+                            else registry_cfg
+                        )
+                    )
+                    sc = build_ssh_cmd(
+                        target,
+                        sync_cmd,
+                        sshpass_bin is not None,
+                        need_sudo and not sshpass_bin,
+                    )
+                    si = (w.password + "\n") if need_sudo else None
+                    subprocess.run(
+                        sc,
+                        env=env,
+                        input=si,
+                        text=True,
+                        timeout=30,
+                        capture_output=True,
+                    )
+                    log.info("  registry config synced")
+
+                restart_cmd = "systemctl restart k3s-agent 2>/dev/null || systemctl restart k3s 2>/dev/null"
+                if need_sudo:
+                    restart_cmd = (
+                        f"sudo -S -p '' sh -c '{restart_cmd}'"
+                        if sshpass_bin
+                        else f"sudo sh -c '{restart_cmd}'"
+                    )
+                rc = build_ssh_cmd(
+                    target,
+                    restart_cmd,
+                    sshpass_bin is not None,
+                    need_sudo and not sshpass_bin,
+                )
+                ri = (w.password + "\n") if need_sudo else None
+                subprocess.run(
+                    rc, env=env, input=ri, text=True, timeout=30, capture_output=True
+                )
+                log.info("  k3s-agent restarted")
+
+                results.append(f"Worker {target} ({remote_hostname}): ok")
+                configured_hostnames.add(remote_hostname)
+                continue
+
+            # fresh join
+            k3s_url = f"https://{server_ip}:6443"
+            install_cmd = (
+                f"curl -sfL https://get.k3s.io | "
+                f"K3S_URL={k3s_url} K3S_TOKEN={k3s_token} sh -"
+            )
+            cleanup = (
+                "sudo systemctl stop k3s-agent 2>/dev/null; "
+                "sudo systemctl disable k3s-agent 2>/dev/null; "
+                "sudo /usr/local/bin/k3s-killall.sh 2>/dev/null; "
+                "sudo /usr/local/bin/k3s-agent-uninstall.sh 2>/dev/null; "
+                "sudo rm -rf /var/lib/rancher/k3s"
+            )
+            install_cmd = f"{cleanup}; {registry_cfg}{install_cmd}"
+
+            if need_sudo:
+                install_cmd = (
+                    f"sudo -S -p '' sh -c '{install_cmd}'"
+                    if sshpass_bin
+                    else f"sudo sh -c '{install_cmd}'"
+                )
+
+            ssh_cmd = build_ssh_cmd(
+                target,
+                install_cmd,
+                sshpass_bin is not None,
+                need_sudo and not sshpass_bin,
+            )
+            stdin_input = (w.password + "\n") if need_sudo else None
+
+            log.info("Joining %s via SSH ...", target)
+            try:
+                result = subprocess.run(
+                    ssh_cmd, env=env, input=stdin_input, text=True, timeout=120
+                )
+            except subprocess.TimeoutExpired:
+                log.error("SSH timeout for %s", target)
+                results.append(f"Worker {target}: SSH timeout")
+                continue
+
+            if result.returncode == 0:
+                log.info("Node %s joined successfully", remote_hostname)
+                results.append(f"Worker {target} ({remote_hostname}): joined")
+            else:
+                log.error("Join failed for %s: exit %s", target, result.returncode)
+                results.append(f"Worker {target}: failed (exit {result.returncode})")
+
+            configured_hostnames.add(remote_hostname)
+
+        pruned = self._prune_stale_workers(config, configured_hostnames)
+        results.extend(pruned)
+        return results
+
+    # ── Repair ──────────────────────────────────────────────────────────────
+
+    def repair(self) -> None:
+        """Auto-repair: fix broken registry, restart stuck containers."""
+        kubeconfig = self.get_kubeconfig_path()
+
+        need_repair = False
+        svc = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "svc",
+                "registry",
+                "-n",
+                "kcs-system",
+                "--kubeconfig",
+                kubeconfig,
+            ],
+            capture_output=True,
+        )
+        if svc.returncode != 0:
+            need_repair = True
+        else:
+            ready_check = subprocess.run(
+                [
+                    "kubectl",
+                    "get",
+                    "deployment",
+                    "registry",
+                    "-n",
+                    "kcs-system",
+                    "-o",
+                    "jsonpath={.status.readyReplicas}",
+                    "--kubeconfig",
+                    kubeconfig,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if ready_check.stdout.strip() not in ("1",):
+                log.warning(
+                    "Registry not ready (readyReplicas=%s)", ready_check.stdout.strip()
+                )
+                need_repair = True
+
+        if need_repair:
+            log.info("Repairing registry...")
+            subprocess.run(
+                [
+                    "kubectl",
+                    "delete",
+                    "deployment",
+                    "registry",
+                    "-n",
+                    "kcs-system",
+                    "--ignore-not-found",
+                    "--kubeconfig",
+                    kubeconfig,
+                ],
+                capture_output=True,
+                timeout=10,
+            )
+            subprocess.run(
+                [
+                    "kubectl",
+                    "delete",
+                    "pvc",
+                    "registry",
+                    "-n",
+                    "kcs-system",
+                    "--ignore-not-found",
+                    "--kubeconfig",
+                    kubeconfig,
+                ],
+                capture_output=True,
+                timeout=10,
+            )
+            time.sleep(2)
+            subprocess.run(
+                [
+                    "kubectl",
+                    "delete",
+                    "pvc",
+                    "registry",
+                    "-n",
+                    "kcs-system",
+                    "--ignore-not-found",
+                    "--force",
+                    "--kubeconfig",
+                    kubeconfig,
+                ],
+                capture_output=True,
+                timeout=10,
+            )
+            reg_info = self._ensure_registry()
+            if not reg_info:
+                log.error("Failed to deploy registry")
+                sys.exit(1)
+            log.info("Registry repaired, ClusterIP: %s", reg_info["host"])
+
+        # ensure images are in registry
+        cfg = load()
+        built_images = list(cfg.get("built_images", {}).keys())
+        if built_images:
+            reg = get_registry()
+            if reg:
+                log.info("Checking images in registry...")
+                for tag in built_images:
+                    tag_result = subprocess.run(
+                        ["docker", "image", "inspect", tag],
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    if tag_result.returncode == 0:
+                        log.info("Pushing %s to registry", tag)
+                        self._push_to_registry(tag, reg)
+                    else:
+                        log.warning("Local image %s not found, skipping", tag)
+                log.info("Images synced to registry")
+
+        # restart stuck containers
+        try:
+            client = self.get_client()
+            containers = client.list()
+            for c in containers:
+                if c["status"] == "pending" and c["replicas"] == 0:
+                    log.info("Restarting stuck container: %s", c["name"])
+                    client.start(c["name"])
+                    time.sleep(2)
+        except Exception as e:
+            log.error("Failed to restart containers: %s", e)
+            sys.exit(1)
+
+        log.info("Cluster health check: OK")
+
+    # ── NFS ─────────────────────────────────────────────────────────────────
+
+    def setup_nfs(self) -> dict:
+        """Auto-configure NFS shared storage across all nodes."""
+        cfg = self.cluster_config
+        if not cfg:
+            return {"message": "No cluster config loaded (use --config)"}
+        if not cfg.sudo_password:
+            return {"message": "sudo_password not set in config"}
+        if not cfg.workers:
+            return {"message": "No workers in config"}
+
+        sshpass_bin = shutil.which("sshpass")
+        results = []
+
+        server_ip = None
+        try:
+            result = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
+            for ip in result.stdout.strip().split():
+                if not ip.startswith(("127.",)):
+                    server_ip = ip
+                    break
+        except Exception:
+            pass
+        if not server_ip:
+            return {"message": "Cannot detect server IP", "results": []}
+        log.info("NFS server IP: %s", server_ip)
+
+        # 1. Install NFS server locally
+        log.info("Installing nfs-kernel-server locally...")
+        step1 = subprocess.run(
+            ["sudo", "-S", "-p", "", "apt", "install", "nfs-kernel-server", "-y"],
+            input=cfg.sudo_password + "\n",
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+        results.append(
+            "nfs-kernel-server: " + ("installed" if step1.returncode == 0 else "FAILED")
+        )
+
+        nfs_path = cfg.nfs_path or "/srv/nfs/k3s"
+
+        # 2. Export NFS path
+        log.info("Setting up NFS export %s...", nfs_path)
+        setup_cmds = (
+            f"mkdir -p {nfs_path} && "
+            f"chmod 777 {nfs_path} && "
+            f"grep -q '{nfs_path}' /etc/exports || echo '{nfs_path} *(rw,sync,no_subtree_check,no_root_squash)' >> /etc/exports && "
+            "exportfs -ra"
+        )
+        step2 = subprocess.run(
+            ["sudo", "-S", "-p", "", "bash", "-c", setup_cmds],
+            input=cfg.sudo_password + "\n",
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        results.append(
+            f"NFS export {nfs_path}: " + ("ok" if step2.returncode == 0 else "FAILED")
+        )
+
+        # 3. Install nfs-common on each worker
+        for w in cfg.workers:
+            target = f"{w.user}@{w.host}"
+            env = os.environ.copy()
+            if sshpass_bin:
+                env["SSHPASS"] = w.password
+
+            need_sudo = w.user != "root"
+            log.info("Installing nfs-common on %s ...", target)
+
+            install_cmd = "apt install nfs-common -y"
+            if need_sudo:
+                install_cmd = (
+                    f"sudo -S -p '' bash -c '{install_cmd}'"
+                    if sshpass_bin
+                    else f"sudo bash -c '{install_cmd}'"
+                )
+
+            sc = build_ssh_cmd(
+                target,
+                install_cmd,
+                sshpass_bin is not None,
+                need_sudo and not sshpass_bin,
+            )
+            si = (w.password + "\n") if need_sudo else None
+            try:
+                r = subprocess.run(
+                    sc, env=env, input=si, text=True, capture_output=True, timeout=60
+                )
+                ok = r.returncode == 0
+            except subprocess.TimeoutExpired:
+                ok = False
+            results.append(f"nfs-common on {target}: {'ok' if ok else 'FAILED'}")
+
+        # 4. Deploy NFS provisioner
+        log.info("Deploying NFS provisioner...")
+        provisioner_yaml = f"""apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nfs-provisioner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nfs-provisioner-runner
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nfs-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: nfs-provisioner
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: nfs-provisioner-runner
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nfs-provisioner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nfs-provisioner
+  template:
+    metadata:
+      labels:
+        app: nfs-provisioner
+    spec:
+      serviceAccountName: nfs-provisioner
+      containers:
+        - name: nfs-provisioner
+          image: registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2
+          volumeMounts:
+            - name: nfs
+              mountPath: /persistentvolumes
+          env:
+            - name: PROVISIONER_NAME
+              value: nfs-client
+            - name: NFS_SERVER
+              value: "{server_ip}"
+            - name: NFS_PATH
+              value: {nfs_path}
+      volumes:
+        - name: nfs
+          nfs:
+            server: {server_ip}
+            path: {nfs_path}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nfs-client
+provisioner: nfs-client
+"""
+        kubeconfig = self.get_kubeconfig_path()
+        subprocess.run(
+            [
+                "kubectl",
+                "delete",
+                "storageclass",
+                "nfs-client",
+                "--ignore-not-found",
+                "--kubeconfig",
+                kubeconfig,
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+        step4 = subprocess.run(
+            ["kubectl", "apply", "--kubeconfig", kubeconfig, "-f", "-"],
+            input=provisioner_yaml,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        if step4.returncode != 0:
+            results.append(f"NFS provisioner: FAILED ({step4.stderr[-200:]})")
+        else:
+            results.append("NFS provisioner: deployed")
+
+        return {
+            "message": "NFS setup complete",
+            "server_ip": server_ip,
+            "results": results,
+        }

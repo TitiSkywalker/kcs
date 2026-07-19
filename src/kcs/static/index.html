@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>kcs</title>
+<style>
+  :root {
+    --bg:#fafaf8; --card:#fff; --text:#1f1f1d; --dim:#8c8a84;
+    --accent:#2d4b73; --green:#2d7d46; --red:#c23b3b; --amber:#b07820;
+    --border:#e8e6e1;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font:13px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+	 background:var(--bg); color:var(--text); min-height:100vh;
+	 display:flex; align-items:center; justify-content:center; }
+  .wrap { width:100%; max-width:900px; padding:40px 20px;
+	  transition:transform .25s ease; }
+  body.panel-open .wrap { transform:translateX(-150px); }
+
+  .logo { text-align:center; margin-bottom:6px; }
+  .logo span { font-size:13px; font-weight:600; letter-spacing:-.01em; color:var(--dim); }
+
+  .topo { display:flex; flex-direction:column; align-items:center; gap:0; position:relative; }
+  .lines { position:absolute; inset:0; pointer-events:none; z-index:0; }
+  .lines path { fill:none; stroke:var(--border); stroke-width:1; }
+  .card { position:relative; z-index:1; background:var(--card); border:1px solid var(--border); border-radius:10px;
+	  width:220px; padding:24px 20px 20px; cursor:pointer; text-align:center;
+	  transition:border-color .2s, box-shadow .2s; outline:none; }
+  .card:hover { border-color:#c4c0b8; box-shadow:0 2px 12px rgba(0,0,0,.05); }
+
+  .card .kind { font-size:9px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; margin-bottom:8px; }
+  .card .name { font-size:14px; font-weight:600; letter-spacing:-.01em; word-break:break-all; }
+  .card .ip { font-size:11px; color:var(--dim); font-family:"SF Mono","Fira Code","Consolas",monospace;
+	      margin-top:4px; }
+  .card .summary { font-size:11px; color:var(--dim); margin-top:10px; }
+
+  .card.server { border-color:var(--accent); }
+  .card.server .kind { color:var(--accent); }
+
+  .dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:4px; vertical-align:middle; }
+  .dot.on { background:var(--green); }
+  .dot.off { background:var(--red); }
+
+  .workers { display:flex; gap:16px; flex-wrap:wrap; justify-content:center;
+	      margin-top:32px; }
+
+  /* action bar */
+  .actions { text-align:center; margin-bottom:12px; }
+  .actions button { font:11px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+	            background:var(--card); border:1px solid var(--border); border-radius:6px;
+	            padding:5px 12px; cursor:pointer; color:var(--accent); font-weight:500;
+	            transition:border-color .2s; }
+  .actions button:hover { border-color:var(--accent); }
+
+  /* panel */
+  .panel { position:fixed; right:0; top:0; bottom:0; width:320px; background:var(--card);
+	   border-left:1px solid var(--border); z-index:10; overflow-y:auto;
+	   transform:translateX(100%); transition:transform .2s ease; }
+  .panel.show { transform:translateX(0); }
+  .panel .close { position:absolute; top:12px; right:12px; width:24px; height:24px;
+	          border:none; background:none; color:var(--dim); cursor:pointer;
+	          font-size:16px; border-radius:4px; display:flex; align-items:center;
+	          justify-content:center; }
+  .panel .close:hover { background:#f3f2ef; }
+  .panel .body { padding:24px 20px; }
+  .panel h3 { font-size:10px; font-weight:600; color:var(--dim); text-transform:uppercase;
+	      letter-spacing:.06em; margin-bottom:4px; }
+  .panel h4 { font-size:11px; font-weight:500; color:var(--dim); margin:18px 0 8px; }
+  .panel .node-name { font-size:18px; font-weight:600; letter-spacing:-.01em; }
+  .panel .node-ip { font-size:12px; color:var(--dim); margin:2px 0 12px;
+	            font-family:"SF Mono","Fira Code","Consolas",monospace; }
+  .panel .item { display:flex; align-items:center; gap:8px; padding:8px 10px;
+	         background:var(--bg); border:1px solid var(--border); border-radius:5px;
+	         margin-bottom:4px; font-size:12px; }
+  .panel .item .badge { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+  .panel .item .badge.running { background:var(--green); }
+  .panel .item .badge.pending { background:var(--amber); }
+  .panel .item .badge.terminating { background:var(--amber); animation:pulse 0.8s ease-in-out infinite alternate; }
+  .panel .item .badge.stopped { background:var(--red); }
+  .panel .mono { font-family:"SF Mono","Fira Code","Consolas",monospace; font-size:10px;
+	         color:var(--dim); margin-left:auto; }
+  .panel .pill { font-size:10px; padding:2px 8px; border-radius:8px; font-weight:500; margin-right:4px;
+	         display:inline-block; }
+  .panel .pill.ok { background:#eaf4ed; color:var(--green); }
+  .panel .pill.err { background:#fce8e8; color:var(--red); }
+  .panel .pill.info { background:#e8edf3; color:var(--accent); }
+  .panel .empty { text-align:center; color:var(--dim); padding:20px 0; font-size:12px; }
+
+  /* item actions */
+  .item-acts { display:flex; gap:2px; flex-shrink:0; }
+  .item-acts button { width:20px; height:20px; border:1px solid var(--border); border-radius:4px;
+	              background:var(--card); cursor:pointer; font-size:10px; line-height:1;
+	              padding:0; display:flex; align-items:center; justify-content:center;
+	              color:var(--dim); transition:border-color .15s, color .15s; }
+  .item-acts button:hover { border-color:var(--accent); color:var(--accent); }
+  .item-acts button.danger:hover { border-color:var(--red); color:var(--red); }
+
+  /* form */
+  .fld { margin-bottom:10px; }
+  .fld label { display:block; font-size:10px; font-weight:500; color:var(--dim);
+	       text-transform:uppercase; letter-spacing:.04em; margin-bottom:3px; }
+  .fld input { width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:5px;
+	       font:12px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+	       background:var(--bg); color:var(--text); outline:none; }
+  .fld input:focus { border-color:var(--accent); }
+  .fld-row { display:flex; gap:8px; }
+  .fld-row .fld { flex:1; }
+
+  .sep { height:1px; background:var(--border); margin:18px 0; }
+
+  .btn { display:block; width:100%; padding:7px 0; border:none; border-radius:6px;
+	 font:12px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+	 font-weight:500; cursor:pointer; transition:background .15s; }
+  .btn.primary { background:var(--accent); color:#fff; }
+  .btn.primary:hover { background:#1e3a5c; }
+  .btn.danger { background:transparent; color:var(--red); border:1px solid var(--border); margin-top:6px; }
+  .btn.danger:hover { background:#fce8e8; border-color:var(--red); }
+
+  .msg { text-align:center; font-size:11px; padding:8px; border-radius:5px; margin-top:8px; display:none; }
+  .msg.ok { display:block; background:#eaf4ed; color:var(--green); }
+  .msg.err { display:block; background:#fce8e8; color:var(--red); }
+
+  .hint { text-align:center; font-size:10px; color:#d0cec8; margin-top:28px; }
+
+  /* bars */
+  .bar { height:4px; background:#e8e6e1; border-radius:2px; position:relative; overflow:hidden; }
+  .bar-fill { position:absolute; left:0; top:0; height:100%; background:var(--accent);
+	      border-radius:2px; transition:width .5s ease; }
+  .bar.high .bar-fill { background:var(--amber); }
+  @keyframes pulse { from { opacity:1; } to { opacity:0.3; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo"><span>kcs</span></div>
+  <div class="actions"><button onclick="showCreate()">+ New Container</button></div>
+  <div id="topo" class="topo"></div>
+  <div class="hint">click a card to inspect  ·  esc to close</div>
+</div>
+
+<div class="panel" id="p">
+  <button class="close" onclick="closePanel()">&times;</button>
+  <div class="body" id="pb"></div>
+</div>
+
+<script>
+const A = '/api/v1';
+let data = null;
+let _view = null;
+
+async function R() {
+  try { data = await (await fetch(A+'/status')).json(); render(); }
+  catch(e) { setTimeout(R,2000); }
+}
+
+async function api(method, path, body) {
+  const opts = {method, headers:{'Content-Type':'application/json'}};
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(A+path, opts);
+  if (!r.ok) {
+    const d = await r.json().catch(()=>({}));
+    throw new Error(d.detail || r.statusText);
+  }
+  return r.json().catch(()=>({}));
+}
+
+function render() {
+  const {server, workers, containers, images, nfs} = data;
+
+  const allNodes = [server, ...workers];
+  window._maxHW = {cpu:0, memory:0, gpu:0};
+  allNodes.forEach(n => {
+    const a = n.allocatable || n.capacity || {};
+    window._maxHW.cpu = Math.max(window._maxHW.cpu, a.cpu || 0);
+    window._maxHW.memory = Math.max(window._maxHW.memory, a.memory || 0);
+    window._maxHW.gpu = Math.max(window._maxHW.gpu, a.gpu || 0);
+  });
+
+  let h = '';
+
+  const sres = server.allocatable || server.capacity;
+  let serverSum = `${images.length} images · ${containers.length} containers`;
+  if (sres) serverSum += ` · ${fmtCPU(sres.cpu || 0)} cpu · ${fmtMem(sres.memory || 0)}`;
+
+  h += `<svg class="lines" id="lines"></svg>`;
+
+  h += `<div class="card server" id="card-server" onclick="showServer()">
+    <div class="kind"><span class="dot ${server.status==='Ready'?'on':'off'}"></span>server</div>
+    <div class="name">${server.name}</div>
+    <div class="ip">${server.ip}</div>
+    <div class="summary">${serverSum}${nfs ? ' · nfs' : ''}</div>
+  </div>`;
+
+  if (workers.length) {
+    h += `<div class="workers">`;
+    workers.forEach((w, i) => {
+      const pods = containers.filter(c => c.node && c.node === w.ip);
+      const running = pods.filter(c => c.status==='running').length;
+      const wr = w.allocatable || w.capacity || {};
+      const wu = w.used || {};
+      let wSum = `${pods.length} container${pods.length!==1?'s':''} · ${running} up`;
+      if (wr.cpu) wSum += ` · ${fmtCPU(wu.cpu||0)}/${fmtCPU(wr.cpu)} cpu`;
+      if (wr.gpu > 0) wSum += ` · ${wu.gpu||0}/${wr.gpu} gpu`;
+      if (w.disk_pressure) wSum += ` · <span style="color:var(--red)">disk</span>`;
+      h += `<div class="card" id="card-w${i}" onclick="showWorker(${i})">
+	<div class="kind"><span class="dot ${w.status==='Ready'?'on':'off'}"></span>worker</div>
+	<div class="name">${w.name}</div>
+	<div class="ip">${w.ip}</div>
+	<div class="summary">${wSum}</div>
+      </div>`;
+    });
+    h += `</div>`;
+  }
+
+  document.getElementById('topo').innerHTML = h;
+  window._workers = workers;
+  setTimeout(drawLines, 20);
+  refreshPanel();
+}
+
+function fmtCPU(v) {
+  if (v == null) return '?';
+  if (typeof v === 'string') return v;
+  if (v >= 1) return v % 1 === 0 ? v.toString() : v.toFixed(1);
+  return (v * 1000).toFixed(0) + 'm';
+}
+
+function fmtMem(v) {
+  if (v == null) return '?';
+  if (typeof v === 'string') return v;
+  if (v >= 1024**3) return (v / 1024**3).toFixed(v % 1024**3 === 0 ? 0 : 0) + 'Gi';
+  if (v >= 1024**2) return (v / 1024**2).toFixed(0) + 'Mi';
+  if (v >= 1024) return (v / 1024).toFixed(0) + 'Ki';
+  return v + 'B';
+}
+
+function hwBar(label, used, total, maxTotal) {
+  if (!total && !used) return '';
+  const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+  const width = maxTotal > 0 ? Math.max(2, (total / maxTotal) * 100) : 100;
+  const fill = pct > 0 ? `<span class="bar-fill" style="width:${pct}%"></span>` : '';
+  const cls = pct > 90 ? 'bar high' : 'bar';
+  return `<div class="item" style="display:block;padding:6px 10px">
+    <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+      <span>${label}</span>
+      <span class="mono">${fmtCPU(used)} / ${fmtCPU(total)}</span>
+    </div>
+    <div class="${cls}" style="width:${width}%">${fill}</div>
+  </div>`;
+}
+
+function hwMemBar(label, used, total, maxTotal) {
+  if (!total && !used) return '';
+  const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+  const width = maxTotal > 0 ? Math.max(2, (total / maxTotal) * 100) : 100;
+  const fill = pct > 0 ? `<span class="bar-fill" style="width:${pct}%"></span>` : '';
+  const cls = pct > 90 ? 'bar high' : 'bar';
+  return `<div class="item" style="display:block;padding:6px 10px">
+    <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+      <span>${label}</span>
+      <span class="mono">${fmtMem(used)} / ${fmtMem(total)}</span>
+    </div>
+    <div class="${cls}" style="width:${width}%">${fill}</div>
+  </div>`;
+}
+
+function hwSection(node) {
+  const a = node.allocatable || node.capacity || {};
+  const u = node.used || {};
+  const cpu = a.cpu || 0;
+  const mem = a.memory || 0;
+  const gpu = a.gpu || 0;
+
+  let maxCPU = cpu, maxMem = mem, maxGPU = gpu;
+  if (window._maxHW) {
+    maxCPU = window._maxHW.cpu;
+    maxMem = window._maxHW.memory;
+    maxGPU = window._maxHW.gpu;
+  }
+
+  const bars = [];
+  if (cpu > 0) bars.push(hwBar('CPU', u.cpu || 0, cpu, maxCPU));
+  if (mem > 0) bars.push(hwMemBar('Memory', u.memory || 0, mem, maxMem));
+  if (gpu > 0) bars.push(hwBar('GPU', u.gpu || 0, gpu, maxGPU));
+  if (!bars.length) return '';
+  return `<h4>hardware</h4>${bars.join('')}`;
+}
+
+function open(html) {
+  document.getElementById('pb').innerHTML = html;
+  document.getElementById('p').classList.add('show');
+  document.body.classList.add('panel-open');
+}
+
+function closePanel() {
+  document.getElementById('p').classList.remove('show');
+  document.body.classList.remove('panel-open');
+}
+
+function drawLines() {
+  const topo = document.getElementById('topo');
+  const svg = document.getElementById('lines');
+  const server = document.getElementById('card-server');
+  if (!topo || !svg || !server) return;
+
+  const tr = topo.getBoundingClientRect();
+  const sr = server.getBoundingClientRect();
+  const sx = sr.left + sr.width/2 - tr.left;
+  const sy = sr.bottom - tr.top;
+
+  let paths = '';
+  for (let i = 0; ; i++) {
+    const w = document.getElementById('card-w'+i);
+    if (!w) break;
+    const wr = w.getBoundingClientRect();
+    const ex = wr.left + wr.width/2 - tr.left;
+    const ey = wr.top - tr.top;
+    const cy1 = sy + (ey - sy) * 0.4;
+    const cy2 = sy + (ey - sy) * 0.6;
+    paths += `<path d="M${sx},${sy} C${sx},${cy1} ${ex},${cy2} ${ex},${ey}" />`;
+  }
+  svg.setAttribute('viewBox', `0 0 ${tr.width} ${tr.height}`);
+  svg.setAttribute('width', tr.width);
+  svg.setAttribute('height', tr.height);
+  svg.innerHTML = paths;
+}
+
+function refreshPanel() {
+  if (!document.getElementById('p').classList.contains('show')) return;
+  if (!_view) return;
+  if (_view.type === 'server') showServer();
+  else if (_view.type === 'worker') showWorker(_view.i);
+  else if (_view.type === 'container') showContainer(_view.name);
+}
+
+	function resSummary(c) {
+	  const r = c.resources || {};
+	  const parts = [];
+	  if (r['nvidia.com/gpu']) parts.push('GPU:'+r['nvidia.com/gpu']);
+	  if (r.cpu) parts.push('CPU:'+r.cpu);
+	  if (r.memory) parts.push('Mem:'+r.memory);
+	  if (!parts.length) return '';
+	  return `<span style="font-size:9px;color:var(--dim);margin-left:4px">${parts.join(' ')}</span>`;
+	}
+
+function containerActs(c) {
+  if (c.status === 'running') return `<button onclick="event.stopPropagation();doStop('${c.name}')" title="stop">⏹</button>`;
+  if (c.status === 'stopped') return `<button onclick="event.stopPropagation();doStart('${c.name}')" title="start">▶</button>`;
+  if (c.status === 'terminating') return `<span style="font-size:9px;color:var(--amber)">stopping…</span>`;
+  return '';
+}
+
+function showServer() {
+  _view = {type:'server'};
+  const {server, images, containers} = data;
+  open(`
+    <h3>server</h3>
+    <div class="node-name">${server.name}</div>
+    <div class="node-ip">${server.ip}</div>
+    <span class="pill ${server.status==='Ready'?'ok':'err'}">${server.status}</span>
+    ${data.nfs?'<span class="pill info">NFS</span>':`<span class="pill err">no NFS</span>`}
+    ${server.taints && server.taints.length ? `<h4>taints</h4>${server.taints.map(t => `<div class="item"><span class="badge stopped"></span><span>${t}</span></div>`).join('')}` : ''}
+    ${hwSection(server)}
+    <h4>containers · ${containers.length}</h4>
+    ${containers.length ? containers.map(c => `<div class="item" style="cursor:pointer" onclick="event.stopPropagation();showContainer('${c.name}')">
+      <span class="badge ${c.status}"></span><span style="flex:1">${c.name}</span>
+      <span class="mono">${c.image.split('/').pop()}</span>
+      <span class="mono" style="font-size:9px">@${c.node||'?'}</span>
+      <span class="item-acts">
+	${containerActs(c)}
+	<button onclick="event.stopPropagation();doDelete('${c.name}')" class="danger" title="delete">✕</button>
+      </span>
+    </div>`).join('')
+    : '<div class="empty">no containers</div>'}
+    <h4>registry · ${images.length} images</h4>
+    ${images.length ? images.map(i => `<div class="item">
+      <span style="flex:1">${i}</span>
+      <span class="mono">:5000/${i}</span>
+      <span class="item-acts">
+	<button onclick="event.stopPropagation();showCreate('${i}')" title="run">▶</button>
+	<button onclick="event.stopPropagation();doDeleteImage('${i}')" class="danger" title="forget">✕</button>
+      </span>
+    </div>`).join('')
+    : '<div class="empty">no images built</div>'}`);
+}
+
+function showWorker(i) {
+  _view = {type:'worker', i};
+  const w = window._workers[i];
+  const pods = data.containers.filter(c => c.node && c.node === w.ip);
+  open(`
+    <h3>worker</h3>
+    <div class="node-name">${w.name}</div>
+    <div class="node-ip">${w.ip}</div>
+    <span class="pill ${w.status==='Ready'?'ok':'err'}">${w.status}</span>
+    ${pods.length?`<span class="pill ok">${pods.filter(p=>p.status==='running').length} running</span>`:''}
+    ${w.disk_pressure?`<span class="pill err" title="k8s will not schedule new pods to this node">disk full</span>`:''}
+    ${data.nfs?`<span class="pill info">NFS</span>`:`<span class="pill err">no NFS</span>`}
+    ${w.taints.length ? `<h4>taints</h4>${w.taints.map(t => `<div class="item"><span class="badge stopped"></span><span>${t}</span></div>`).join('')}` : ''}
+    ${hwSection(w)}
+    <h4>containers · ${pods.length}</h4>
+    ${pods.length ? pods.map(c => `<div class="item" style="cursor:pointer" onclick="event.stopPropagation();showContainer('${c.name}')">
+      <span class="badge ${c.status}"></span><span style="flex:1">${c.name}</span>
+      <span class="mono">${c.image.split('/').pop()}</span>
+      <span class="mono" style="font-size:9px">@${c.node||'?'}</span>
+      <span class="item-acts">
+	${containerActs(c)}
+	<button onclick="event.stopPropagation();doDelete('${c.name}')" class="danger" title="delete">✕</button>
+      </span>
+    </div>`).join('')
+    : '<div class="empty">no containers on this node</div>'}`);
+}
+
+// ── Container detail ─────────────────────────────────────────────────────
+
+async function showContainer(name) {
+  _view = {type:'container', name};
+  try {
+    const c = await api('GET', `/containers/${name}`);
+    const r = c.resources || {};
+    const req = r.requests || {};
+    const lim = r.limits || {};
+    const hasHW = req['nvidia.com/gpu'] || req.cpu || req.memory;
+
+    let hw = '';
+    if (hasHW) {
+      hw = '<h4>hardware</h4>';
+      if (req.cpu) hw += `<div class="item"><span>CPU</span><span class="mono">${req.cpu}${lim.cpu && lim.cpu !== req.cpu ? ' / limit: '+lim.cpu : ''}</span></div>`;
+      if (req.memory) hw += `<div class="item"><span>Memory</span><span class="mono">${req.memory}${lim.memory && lim.memory !== req.memory ? ' / limit: '+lim.memory : ''}</span></div>`;
+      if (req['nvidia.com/gpu']) hw += `<div class="item"><span>GPU</span><span class="mono">${req['nvidia.com/gpu']}</span></div>`;
+    }
+
+    let vols = '';
+    if (c.volumes && c.volumes.length) {
+      vols = '<h4>volumes</h4>';
+      vols += c.volumes.map(v => `<div class="item"><span>${v.mount_path}</span><span class="mono">${v.name}</span></div>`).join('');
+    }
+
+    let envs = '';
+    if (c.env && Object.keys(c.env).length) {
+      envs = '<h4>environment</h4>';
+      envs += Object.entries(c.env).map(([k,v]) => `<div class="item"><span>${k}</span><span class="mono">${v}</span></div>`).join('');
+    }
+
+    let ports = '';
+    if (c.ports && c.ports.length) {
+      ports = '<h4>ports</h4>';
+      ports += c.ports.map(p => `<div class="item"><span>${p.port}→${p.target_port}</span><span class="mono">${p.protocol}</span></div>`).join('');
+    }
+
+    open(`
+      <h3>container</h3>
+      <div class="node-name">${c.name}</div>
+      <div style="margin:4px 0 8px"><span class="pill ${c.status==='running'?'ok':c.status==='terminating'?'info':c.status==='stopped'?'err':'info'}">${c.status}</span>${c.replicas > 1 ? `<span class="pill info">×${c.replicas}</span>` : ''}</div>
+      <div class="item" style="flex-direction:column;align-items:flex-start;gap:2px">
+        <span style="font-size:10px;color:var(--dim)">image</span>
+        <span class="mono" style="font-size:11px">${c.image}</span>
+      </div>
+      ${hw}
+      ${ports}
+      ${vols}
+      ${envs}
+      ${!hasHW && !c.volumes?.length && !Object.keys(c.env||{}).length && !c.ports?.length ? '<div class="empty">no hardware, volumes, ports, or env vars</div>' : ''}
+      <div style="margin-top:16px;display:flex;gap:6px">
+        ${c.status === 'running' ? `<button class="btn primary" style="flex:1" onclick="doStop('${c.name}')">Stop</button>` : ''}
+        ${c.status === 'stopped' ? `<button class="btn primary" style="flex:1" onclick="doStart('${c.name}')">Start</button>` : ''}
+        ${c.status === 'terminating' ? `<span style="font-size:11px;color:var(--amber);flex:1;text-align:center;padding:7px 0">stopping…</span>` : ''}
+        <button class="btn danger" style="flex:1" onclick="doDelete('${c.name}')">Delete</button>
+      </div>
+    `);
+  } catch(e) {
+    open(`<h3>container</h3><div class="empty">Failed to load: ${e.message}</div>`);
+  }
+}
+
+// ── Create container ──────────────────────────────────────────────────────
+
+function showCreate(image) {
+  _view = {type:'create'};
+  const nodes = (data.workers || []).map(w => `<option value="${w.name}">${w.name}</option>`).join('');
+  open(`
+    <h3>new container</h3>
+    <div class="fld"><label>Image</label><input id="f-image" value="${image||''}" placeholder="nginx:alpine"></div>
+    <div class="fld"><label>Name</label><input id="f-name" placeholder="auto"></div>
+    <div class="fld-row">
+      <div class="fld"><label>Ports</label><input id="f-ports" placeholder="8080"></div>
+      <div class="fld"><label>Replicas</label><input id="f-replicas" value="1"></div>
+    </div>
+    <div class="fld"><label>Node</label><select id="f-node" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:5px;font:12px/1.4 -apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',sans-serif;background:var(--bg);color:var(--text);outline:none"><option value="">auto</option>${nodes}</select></div>
+    <div class="fld"><label>Volumes</label><input id="f-volumes" placeholder="/data  or  /data, /srv/app:/mnt"></div>
+    <div class="sep"></div>
+    <h4>hardware (optional)</h4>
+    <div class="fld-row">
+      <div class="fld"><label>CPU</label><input id="f-cpu" placeholder="e.g. 500m, 1"></div>
+      <div class="fld"><label>GPUs</label><input id="f-gpus" placeholder="0"></div>
+    </div>
+    <div class="fld"><label>Memory</label><input id="f-memory" placeholder="e.g. 256Mi, 1Gi"></div>
+    <button class="btn primary" onclick="doCreate()">Create</button>
+    <div id="f-msg" class="msg"></div>
+  `);
+}
+
+async function doCreate() {
+  const m = document.getElementById('f-msg');
+  m.className = 'msg';
+  m.textContent = '';
+  const portsRaw = document.getElementById('f-ports').value.trim();
+  const ports = portsRaw ? portsRaw.split(',').map(s=>parseInt(s.trim())).filter(Boolean) : null;
+  const replicas = parseInt(document.getElementById('f-replicas').value) || 1;
+  const gpusRaw = document.getElementById('f-gpus').value.trim();
+  const gpus = gpusRaw ? parseInt(gpusRaw) : null;
+  const cpu = document.getElementById('f-cpu').value.trim() || null;
+  const memory = document.getElementById('f-memory').value.trim() || null;
+  const name = document.getElementById('f-name').value.trim() || null;
+  const node = document.getElementById('f-node').value || null;
+  const volumesRaw = document.getElementById('f-volumes').value.trim();
+  const volumes = volumesRaw ? volumesRaw.split(',').map(s => s.trim()).filter(Boolean) : null;
+
+  const body = {
+    image: document.getElementById('f-image').value.trim(),
+    name, ports, replicas, node, volumes, gpus, cpu, memory,
+  };
+  if (!body.image) { m.className='msg err'; m.textContent='Image is required'; return; }
+
+  try {
+    await api('POST', '/containers', body);
+    m.className = 'msg ok';
+    m.textContent = 'Created.';
+    setTimeout(() => { R(); closePanel(); }, 800);
+  } catch(e) {
+    m.className = 'msg err';
+    m.textContent = e.message;
+  }
+}
+
+// ── Container actions ─────────────────────────────────────────────────────
+
+async function doStop(name) {
+  try {
+    await api('POST', `/containers/${name}/stop`);
+    await R();
+    setTimeout(() => R(), 3000);  // catch up after pod termination grace period
+  } catch(e) { alert('Stop failed: ' + e.message); }
+}
+
+async function doStart(name) {
+  try {
+    await api('POST', `/containers/${name}/start`);
+    await R();
+    setTimeout(() => R(), 3000);  // catch up after pod starts
+  } catch(e) { alert('Start failed: ' + e.message); }
+}
+
+async function doDelete(name) {
+  if (!confirm(`Delete '${name}'?`)) return;
+  try {
+    await api('DELETE', `/containers/${name}?force=true`);
+    await R();
+    // Go back to parent view instead of closing the panel
+    if (_view && _view.type === 'container') {
+      showServer();
+    } else {
+      refreshPanel();
+    }
+  } catch(e) { alert('Delete failed: ' + e.message); }
+}
+
+async function doDeleteImage(tag) {
+  if (!confirm(`Forget image '${tag}'?`)) return;
+  try {
+    await api('DELETE', `/images/${encodeURIComponent(tag)}`);
+    await R();
+    showServer();
+  } catch(e) { alert('Delete failed: ' + e.message); }
+}
+
+document.addEventListener('keydown', e => { if(e.key==='Escape') closePanel(); });
+document.addEventListener('click', e => {
+  if (!document.getElementById('p').classList.contains('show')) return;
+  // ignore clicks on cards (they open the panel)
+  if (e.target.closest('.card') || e.target.closest('.actions')) return;
+  if (!e.target.closest('#p')) closePanel();
+});
+
+R(); setInterval(R, 5000);
+</script>
+</body>
+</html>
