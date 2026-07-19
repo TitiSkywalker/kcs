@@ -1,4 +1,4 @@
-<img src="src/kcs/static/icon.svg" width="90" alt="kcs">
+<p align="center"><img src="src/kcs/static/icon.svg" width="140" alt="kcs"></p>
 
 Container controller made simpler than k3s — declarative cluster management,
 REST API, dashboard, and native coding-agent integration.
