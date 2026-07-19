@@ -31,8 +31,7 @@ def list_mcp():
     "/api/v1/mcp/start",
     status_code=201,
     summary="Start an MCP server",
-    description="Launch an MCP SSE server on the given port, "
-    "optionally pinning it to a container.",
+    description="Launch an MCP SSE server on the given port, optionally pinning it to a container.",
     response_description="Port and container the server is bound to.",
     responses={
         201: {"description": "MCP server started"},

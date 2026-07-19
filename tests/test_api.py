@@ -104,7 +104,7 @@ def test_nodes():
     if body and "nodes" in body:
         test("  nodes is list", isinstance(body["nodes"], list))
         for n in body["nodes"]:
-            test(f"  node {n.get('name','?')}", "name" in n and "status" in n)
+            test(f"  node {n.get('name', '?')}", "name" in n and "status" in n)
 
 
 def test_info():
@@ -705,9 +705,9 @@ def main():
     PORT = _find_free_port()
     BASE = BASE.format(port=PORT)
 
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"kcs API test  ·  port={PORT}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if not start_server(PORT):
         sys.exit(1)
@@ -728,13 +728,13 @@ def main():
         print("\nServer stopped.")
 
     total = passed + failed
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Results: {passed}/{total} passed", end="")
     if failed:
         print(f", {failed} FAILED")
     else:
         print(" ✓ all pass")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     return 0 if failed == 0 else 1
 

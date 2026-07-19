@@ -181,7 +181,7 @@ def ssh(name: str, pod: int | None) -> None:
 
     idx = pod if pod is not None else 0
     if idx >= len(pods):
-        raise click.ClickException(f"Pod {idx} out of range (0-{len(pods)-1})")
+        raise click.ClickException(f"Pod {idx} out of range (0-{len(pods) - 1})")
 
     kubeconfig = os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kcs/k3s.yaml")
     if not os.path.exists(kubeconfig):

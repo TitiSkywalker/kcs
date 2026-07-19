@@ -577,10 +577,7 @@ spec:
 
             # fresh join
             k3s_url = f"https://{server_ip}:6443"
-            install_cmd = (
-                f"curl -sfL https://get.k3s.io | "
-                f"K3S_URL={k3s_url} K3S_TOKEN={k3s_token} sh -"
-            )
+            install_cmd = f"curl -sfL https://get.k3s.io | K3S_URL={k3s_url} K3S_TOKEN={k3s_token} sh -"
             cleanup = (
                 "sudo systemctl stop k3s-agent 2>/dev/null; "
                 "sudo systemctl disable k3s-agent 2>/dev/null; "
