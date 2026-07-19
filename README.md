@@ -1,6 +1,8 @@
+<img src="src/kcs/static/icon.svg" width="64" align="right" alt="kcs logo">
+
 # kcs
 
-Container controller made simpler than k3s — declarative cluster management,REST API, dashboard, and native coding-agent integration.
+Container controller made simpler than k3s — declarative cluster management, REST API, dashboard, and native coding-agent integration.
 
 ## Requirements
 

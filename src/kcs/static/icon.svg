@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 90 52">
+  <defs>
+    <!-- tr = area covered by the light overlay.  The dark part is whatever
+         this does NOT cover (the bottom-left quadrant of the 8). -->
+    <clipPath id="tr">
+      <rect x="26" y="0"  width="29" height="24.5"/>   <!-- top half → all light -->
+      <rect x="42" y="24.5" width="14" height="26"/>   <!-- bottom-right → light -->
+    </clipPath>
+  </defs>
+
+  <text x="0" y="42" font-family="'SF Mono','Fira Code','Cascadia Code',Consolas,monospace"
+        font-size="48" font-weight="500" fill="#2d4b73">k8s</text>
+
+  <g clip-path="url(#tr)">
+    <text x="0" y="42" font-family="'SF Mono','Fira Code','Cascadia Code',Consolas,monospace"
+          font-size="48" font-weight="500" fill="#c4c0b8">k8s</text>
+  </g>
+</svg>
