@@ -93,5 +93,6 @@ Four tools exposed: `container_exec`, `container_read`, `container_write`,
 ## Tests
 
 ```bash
-python tests/test_api.py
+python tests/runner.py          # integration suite
+python tests/performance.py     # throughput + latency benchmarks
 ```
