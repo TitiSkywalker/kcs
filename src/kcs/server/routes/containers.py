@@ -7,7 +7,7 @@ import os
 import subprocess
 import time
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from kcs.server.models import ContainerCreate, ExecRequest, ScaleRequest
@@ -242,6 +242,80 @@ def exec_container(name: str, req: ExecRequest, pod: int | None = Query(default=
     if isinstance(result, str) and result.startswith("Error"):
         raise HTTPException(status_code=500, detail=result)
     return {"output": result}
+
+
+@router.post(
+    "/api/v1/containers/{name}/upload",
+    summary="Upload a file into a container",
+    description="Upload a file to a path inside a container. "
+                "If the target path is on a PVC backed by NFS, the file is "
+                "written directly to the NFS export on the server. "
+                "Otherwise `kubectl cp` is used as a fallback.",
+    response_description="Upload confirmation with path and size.",
+    responses={
+        200: {"description": "File uploaded"},
+        404: {"description": "Container or volume not found"},
+        500: {"description": "Upload failed"},
+    },
+)
+def upload_file(
+    name: str,
+    path: str = Query(..., description="Target path inside the container"),
+    file: UploadFile = File(..., description="File to upload"),
+):
+    client = get_service().get_client()
+    svc = get_service()
+
+    # Verify container exists
+    detail = client.get(name)
+    if not detail:
+        raise HTTPException(status_code=404, detail=f"Container '{name}' not found")
+
+    # Try NFS direct write first
+    parent_dir = os.path.dirname(path) or "/"
+    nfs_base = client.resolve_volume_path(name, parent_dir)
+    if nfs_base:
+        import shutil
+        dest = os.path.join(nfs_base, os.path.basename(path) if os.path.basename(path) else "")
+        if os.path.isdir(dest):
+            dest = os.path.join(dest, file.filename or "upload")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        try:
+            with open(dest, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+            size = os.path.getsize(dest)
+            return {"path": path, "size": size, "method": "nfs"}
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"NFS write failed: {e}")
+
+    # Fallback: kubectl cp
+    import tempfile
+    try:
+        pod_name = client._get_target_pod(name)
+        if not pod_name:
+            raise HTTPException(status_code=404, detail="No running pod found")
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            import shutil
+            shutil.copyfileobj(file.file, tmp)
+            tmp_path = tmp.name
+
+        try:
+            env = os.environ.copy()
+            kubeconfig = svc.get_kubeconfig_path()
+            if kubeconfig:
+                env["KUBECONFIG"] = kubeconfig
+            subprocess.run(
+                ["kubectl", "cp", tmp_path,
+                 f"{client.namespace}/{pod_name}:{path}"],
+                env=env, check=True, timeout=30,
+            )
+        finally:
+            os.unlink(tmp_path)
+
+        return {"path": path, "size": file.size or 0, "method": "kubectl-cp"}
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"kubectl cp failed: {e}")
 
 
 # ── Shell sessions ──────────────────────────────────────────────────────────

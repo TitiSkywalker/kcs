@@ -536,6 +536,75 @@ def _find_free_port():
         return s.getsockname()[1]
 
 
+def test_upload():
+    """Upload files to containers — PVC (NFS direct) and non-PVC (kubectl cp)."""
+    print("\n── upload ──")
+
+    tmp = Path("/tmp/kcs-test-upload.txt")
+    tmp.write_text("kcs-upload-test\nline2\n")
+
+    # ── PVC container: NFS direct write ───────────────────────────────
+    test_name = "kcs-test-upload-pvc"
+    code, body = req("GET", f"/containers/{test_name}")
+    if code == 200:
+        req("DELETE", f"/containers/{test_name}?force=true")
+        time.sleep(2)
+
+    code, body = req("POST", "/containers", json={
+        "image": "nginx:alpine", "name": test_name, "volumes": ["/data"],
+    })
+    test(f"  create (PVC)", code in (200, 201), f"status={code}")
+    time.sleep(5)
+
+    with open(tmp, "rb") as fh:
+        code, body = req(
+            "POST", f"/containers/{test_name}/upload?path=/data/hello.txt",
+            files={"file": fh},
+            headers={"Content-Type": None},  # let requests set multipart
+        )
+    test(
+        "  upload (NFS)", code == 200 and body.get("method") == "nfs",
+        f"status={code} body={body}",
+    )
+
+    # Verify via container exec
+    code, body = req("POST", f"/containers/{test_name}/exec",
+                      json={"command": ["cat", "/data/hello.txt"]})
+    test("  verify content",
+         code == 200 and "kcs-upload-test" in str(body), f"body={str(body)[:80]}")
+
+    req("DELETE", f"/containers/{test_name}?force=true")
+    time.sleep(2)
+
+    # ── Non-PVC container: kubectl cp fallback ────────────────────────
+    test_name = "kcs-test-upload-nopvc"
+    code, body = req("GET", f"/containers/{test_name}")
+    if code == 200:
+        req("DELETE", f"/containers/{test_name}?force=true")
+        time.sleep(2)
+
+    code, body = req("POST", "/containers", json={
+        "image": "nginx:alpine", "name": test_name,
+    })
+    test(f"  create (no PVC)", code in (200, 201), f"status={code}")
+    time.sleep(5)
+
+    with open(tmp, "rb") as fh:
+        code, body = req(
+            "POST", f"/containers/{test_name}/upload?path=/tmp/hello.txt",
+            files={"file": fh},
+            headers={"Content-Type": None},
+        )
+    test(
+        "  upload (kubectl cp)", code == 200,
+        f"status={code} body={body}",
+    )
+
+    req("DELETE", f"/containers/{test_name}?force=true")
+    time.sleep(2)
+    tmp.unlink()
+
+
 def test_containers_resources():
     """Create container with cpu/memory resource declarations, verify spec."""
     print("\n── containers (resources) ──")
@@ -720,6 +789,7 @@ def main():
         test_containers()
         test_containers_lifecycle()
         test_containers_resources()
+        test_upload()
         test_mcp_tools()
         test_mcp_http()
         test_mcp_api()

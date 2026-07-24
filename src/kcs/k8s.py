@@ -671,6 +671,30 @@ class KCSClient:
         except FileNotFoundError:
             return "Error: kubectl required (bundled with k3s: ln -s /usr/local/bin/k3s /usr/local/bin/kubectl)"
 
+    def resolve_volume_path(self, name: str, mount_path: str) -> str | None:
+        """Return the host (NFS) path backing a container's volume mount, or None."""
+        pod_objs = self._get_pods(name)
+        if not pod_objs:
+            return None
+        pod = pod_objs[0]
+        for vm in pod.spec.containers[0].volume_mounts or []:
+            if vm.mount_path.rstrip("/") == mount_path.rstrip("/"):
+                for vol in pod.spec.volumes or []:
+                    if vol.name == vm.name and vol.persistent_volume_claim:
+                        pvc_name = vol.persistent_volume_claim.claim_name
+                        try:
+                            pvc = self.core_v1.read_namespaced_persistent_volume_claim(
+                                name=pvc_name, namespace=self.namespace)
+                            pv_name = pvc.spec.volume_name
+                            if pv_name:
+                                pv = self.core_v1.read_persistent_volume(name=pv_name)
+                                nfs = pv.spec.nfs
+                                if nfs:
+                                    return nfs.path
+                        except ApiException:
+                            pass
+        return None
+
     # ── Utility methods ───────────────────────────────────────
 
     @staticmethod
