@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 
 import requests
 from mcp.server import Server
@@ -315,6 +316,21 @@ def start(host: str = "127.0.0.1", port: int = 9999) -> None:
     t = __import__("threading").Thread(target=_run, daemon=True)
     t.start()
     _running[port] = task
+
+    import socket as _socket
+    deadline = time.time() + 10
+    ready = False
+    while time.time() < deadline:
+        try:
+            s = _socket.create_connection((host, port), timeout=0.5)
+            s.close()
+            ready = True
+            break
+        except (OSError, ConnectionRefusedError):
+            time.sleep(0.2)
+    if not ready:
+        stop(port)
+        raise RuntimeError(f"MCP server on port {port} did not become ready")
 
 
 def stop(port: int) -> None:

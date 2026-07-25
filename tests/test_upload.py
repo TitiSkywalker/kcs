@@ -3,61 +3,71 @@
 import time
 from pathlib import Path
 
+import pytest
+import requests
 
-def run(s):
-    print("\n── upload ──")
+
+_PVC = "kcs-test-upload-pvc"
+_NOPVC = "kcs-test-upload-nopvc"
+
+
+@pytest.fixture(scope="module")
+def pvc_container(api):
     tmp = Path("/tmp/kcs-test-upload.txt")
     tmp.write_text("kcs-upload-test\nline2\n")
-
-    # PVC: NFS direct
-    name = "kcs-test-upload-pvc"
-    code, body = s.req("GET", f"/containers/{name}")
-    if code == 200:
-        s.req("DELETE", f"/containers/{name}?force=true")
+    r = requests.get(f"{api}/containers/{_PVC}")
+    if r.status_code == 200:
+        requests.delete(f"{api}/containers/{_PVC}?force=true")
         time.sleep(2)
-
-    code, body = s.req("POST", "/containers", json={
-        "image": "nginx:alpine", "name": name, "volumes": ["/data"],
+    r = requests.post(f"{api}/containers", json={
+        "image": "nginx:alpine", "name": _PVC, "volumes": ["/data"],
     })
-    s.test("  create (PVC)", code in (200, 201), f"status={code}")
+    assert r.status_code in (200, 201)
     time.sleep(5)
-
-    with open(tmp, "rb") as fh:
-        code, body = s.req(
-            "POST", f"/containers/{name}/upload?path=/data/hello.txt",
-            files={"file": fh},
-        )
-    s.test("  upload (NFS)", code == 200 and body.get("method") == "nfs",
-           f"status={code} body={body}")
-
-    code, body = s.req("POST", f"/containers/{name}/exec",
-                        json={"command": ["cat", "/data/hello.txt"]})
-    s.test("  verify content", code == 200 and "kcs-upload-test" in str(body),
-           f"body={str(body)[:80]}")
-
-    s.req("DELETE", f"/containers/{name}?force=true")
+    yield
+    requests.delete(f"{api}/containers/{_PVC}?force=true")
     time.sleep(2)
+    tmp.unlink(missing_ok=True)
 
-    # Non-PVC: kubectl cp
-    name = "kcs-test-upload-nopvc"
-    code, body = s.req("GET", f"/containers/{name}")
-    if code == 200:
-        s.req("DELETE", f"/containers/{name}?force=true")
+
+def test_upload_method_is_nfs(api, pvc_container):
+    with open("/tmp/kcs-test-upload.txt", "rb") as fh:
+        r = requests.post(
+            f"{api}/containers/{_PVC}/upload?path=/data/hello.txt",
+            files={"file": fh})
+    assert r.status_code == 200
+    assert r.json()["method"] == "nfs"
+
+
+def test_verify_content(api, pvc_container):
+    r = requests.post(f"{api}/containers/{_PVC}/exec",
+                       json={"command": ["cat", "/data/hello.txt"]})
+    assert r.status_code == 200
+    assert "kcs-upload-test" in r.json()["output"]
+
+
+@pytest.fixture(scope="module")
+def nopvc_container(api):
+    tmp = Path("/tmp/kcs-test-upload-nopvc.txt")
+    tmp.write_text("kcs-upload-test-no-pvc\n")
+    r = requests.get(f"{api}/containers/{_NOPVC}")
+    if r.status_code == 200:
+        requests.delete(f"{api}/containers/{_NOPVC}?force=true")
         time.sleep(2)
-
-    code, body = s.req("POST", "/containers", json={
-        "image": "nginx:alpine", "name": name,
+    r = requests.post(f"{api}/containers", json={
+        "image": "nginx:alpine", "name": _NOPVC,
     })
-    s.test("  create (no PVC)", code in (200, 201), f"status={code}")
+    assert r.status_code in (200, 201)
     time.sleep(5)
-
-    with open(tmp, "rb") as fh:
-        code, body = s.req(
-            "POST", f"/containers/{name}/upload?path=/tmp/hello.txt",
-            files={"file": fh},
-        )
-    s.test("  upload (kubectl cp)", code == 200, f"status={code} body={body}")
-
-    s.req("DELETE", f"/containers/{name}?force=true")
+    yield
+    requests.delete(f"{api}/containers/{_NOPVC}?force=true")
     time.sleep(2)
-    tmp.unlink()
+    tmp.unlink(missing_ok=True)
+
+
+def test_upload_kubectl_cp(api, nopvc_container):
+    with open("/tmp/kcs-test-upload-nopvc.txt", "rb") as fh:
+        r = requests.post(
+            f"{api}/containers/{_NOPVC}/upload?path=/tmp/hello.txt",
+            files={"file": fh})
+    assert r.status_code == 200, f"upload: {r.status_code} {r.text[:100]}"

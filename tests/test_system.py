@@ -1,45 +1,68 @@
 """Health, status, nodes, info, container read-only tests."""
 
+import pytest
+import requests
 
-def run(s):
-    print("\n── health ──")
-    s.ok("/health")
 
-    print("\n── status ──")
-    body = s.ok_json("/status")
-    if body:
-        s.test("  has server", "server" in body)
-        s.test("  has workers", "workers" in body)
-        s.test("  has containers", "containers" in body)
-        s.test("  has images", "images" in body)
-        s.test("  has nfs", "nfs" in body)
+def test_health(api):
+    r = requests.get(f"{api}/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
 
-    print("\n── nodes ──")
-    body = s.ok_json("/nodes")
-    if body and "nodes" in body:
-        s.test("  nodes is list", isinstance(body["nodes"], list))
-        for n in body["nodes"]:
-            s.test(f"  node {n.get('name', '?')}", "name" in n and "status" in n)
 
-    print("\n── info ──")
-    body = s.ok_json("/info")
-    if body:
-        s.test("  has nodes", "nodes" in body)
-        s.test("  has version", "version" in body)
+def test_status(api):
+    r = requests.get(f"{api}/status")
+    assert r.status_code == 200
+    data = r.json()
+    for key in ("server", "workers", "containers", "images", "nfs"):
+        assert key in data, f"missing key: {key}"
 
-    print("\n── containers (read-only) ──")
-    body = s.ok_json("/containers")
-    containers = body.get("containers", []) if body else []
+
+def test_nodes(api):
+    r = requests.get(f"{api}/nodes")
+    assert r.status_code == 200
+    nodes = r.json()["nodes"]
+    assert isinstance(nodes, list)
+    for n in nodes:
+        assert "name" in n
+        assert "status" in n
+
+
+def test_info(api):
+    r = requests.get(f"{api}/info")
+    assert r.status_code == 200
+    data = r.json()
+    assert "nodes" in data
+    assert "version" in data
+
+
+def test_containers_readonly(api):
+    """Read-only operations on a container (creates throwaway if needed)."""
+    import time
+
+    r = requests.get(f"{api}/containers")
+    assert r.status_code == 200
+    containers = r.json().get("containers", [])
 
     if containers:
-        s.test("  has containers", len(containers) > 0)
         name = containers[0]["name"]
-        code, _ = s.req("GET", f"/containers/{name}")
-        s.test(f"GET /containers/{name}", code == 200, f"status={code}")
-        code, _ = s.req("GET", f"/containers/{name}/pods")
-        s.test(f"GET /containers/{name}/pods", code == 200, f"status={code}")
-        code, _ = s.req("GET", f"/containers/{name}/logs")
-        s.test(f"GET /containers/{name}/logs", code == 200, f"status={code}")
-        s.post_json(f"/containers/{name}/exec", {"command": ["echo", "hello"]}, 200)
     else:
-        s.test("  no existing containers (skip)", True)
+        name = "kcs-test-readonly"
+        r = requests.post(
+            f"{api}/containers",
+            json={"image": "nginx:alpine", "name": name, "ports": [8080]},
+        )
+        assert r.status_code in (200, 201), f"create failed: {r.status_code}"
+        time.sleep(5)
+
+    try:
+        assert requests.get(f"{api}/containers/{name}").status_code == 200
+        assert requests.get(f"{api}/containers/{name}/pods").status_code == 200
+        assert requests.get(f"{api}/containers/{name}/logs").status_code == 200
+        r = requests.post(
+            f"{api}/containers/{name}/exec",
+            json={"command": ["echo", "hello"]})
+        assert r.status_code == 200
+    finally:
+        if not containers:
+            requests.delete(f"{api}/containers/{name}?force=true")
