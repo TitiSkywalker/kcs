@@ -684,7 +684,8 @@ class KCSClient:
                         pvc_name = vol.persistent_volume_claim.claim_name
                         try:
                             pvc = self.core_v1.read_namespaced_persistent_volume_claim(
-                                name=pvc_name, namespace=self.namespace)
+                                name=pvc_name, namespace=self.namespace
+                            )
                             pv_name = pvc.spec.volume_name
                             if pv_name:
                                 pv = self.core_v1.read_persistent_volume(name=pv_name)

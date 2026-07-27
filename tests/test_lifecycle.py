@@ -5,7 +5,6 @@ import time
 import pytest
 import requests
 
-
 _NAME = "kcs-test-throwaway"
 
 
@@ -15,9 +14,14 @@ def _create(api, name, **extra):
     if r.status_code == 200:
         requests.delete(f"{api}/containers/{name}?force=true")
         time.sleep(2)
-    r = requests.post(f"{api}/containers", json={
-        "image": "nginx:alpine", "name": name, **extra,
-    })
+    r = requests.post(
+        f"{api}/containers",
+        json={
+            "image": "nginx:alpine",
+            "name": name,
+            **extra,
+        },
+    )
     assert r.status_code in (200, 201), f"create: {r.status_code} {r.text[:100]}"
     time.sleep(5)
 
@@ -47,15 +51,19 @@ def test_container_stop_and_start(api, container):
     assert r.status_code == 200
     time.sleep(2)
     r = requests.get(f"{api}/containers/{container}")
-    assert r.json()["status"] in ("stopped", "terminating"), \
-        f"status after stop: {r.json().get('status')}"
+    assert r.json()["status"] in (
+        "stopped",
+        "terminating",
+    ), f"status after stop: {r.json().get('status')}"
 
     r = requests.post(f"{api}/containers/{container}/start")
     assert r.status_code == 200
     time.sleep(5)
     r = requests.get(f"{api}/containers/{container}")
-    assert r.json()["status"] in ("running", "pending"), \
-        f"status after start: {r.json().get('status')}"
+    assert r.json()["status"] in (
+        "running",
+        "pending",
+    ), f"status after start: {r.json().get('status')}"
 
 
 def test_container_scale(api, container):
@@ -100,10 +108,16 @@ def res_container(api):
     if r.status_code == 200:
         requests.delete(f"{api}/containers/{_RNAME}?force=true")
         time.sleep(2)
-    r = requests.post(f"{api}/containers", json={
-        "image": "nginx:alpine", "name": _RNAME, "ports": [8080],
-        "cpu": "250m", "memory": "128Mi",
-    })
+    r = requests.post(
+        f"{api}/containers",
+        json={
+            "image": "nginx:alpine",
+            "name": _RNAME,
+            "ports": [8080],
+            "cpu": "250m",
+            "memory": "128Mi",
+        },
+    )
     assert r.status_code in (200, 201)
     time.sleep(5)
     yield
@@ -132,14 +146,25 @@ def test_memory_declared(api, res_container):
 
 
 def test_pod_spec_matches(res_container):
-    import subprocess, os
-    kubeconfig = os.environ.get("KUBECONFIG") or os.path.expanduser(
-        "~/.kcs/k3s.yaml")
+    import os
+    import subprocess
+
+    kubeconfig = os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kcs/k3s.yaml")
     pods = subprocess.run(
-        ["kubectl", "get", "pods", "-l", f"app={_RNAME}",
-         "-o", "jsonpath={.items[0].spec.containers[0].resources}",
-         "--kubeconfig", kubeconfig],
-        capture_output=True, text=True, timeout=10,
+        [
+            "kubectl",
+            "get",
+            "pods",
+            "-l",
+            f"app={_RNAME}",
+            "-o",
+            "jsonpath={.items[0].spec.containers[0].resources}",
+            "--kubeconfig",
+            kubeconfig,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if pods.returncode == 0:
         spec = pods.stdout.strip()

@@ -60,8 +60,8 @@ def test_containers_readonly(api):
         assert requests.get(f"{api}/containers/{name}/pods").status_code == 200
         assert requests.get(f"{api}/containers/{name}/logs").status_code == 200
         r = requests.post(
-            f"{api}/containers/{name}/exec",
-            json={"command": ["echo", "hello"]})
+            f"{api}/containers/{name}/exec", json={"command": ["echo", "hello"]}
+        )
         assert r.status_code == 200
     finally:
         if not containers:

@@ -26,12 +26,21 @@ def api():
     env["PYTHONUNBUFFERED"] = "1"
 
     cmd = [
-        sys.executable, "-m", "uvicorn", "kcs.server:app",
-        "--host", "127.0.0.1", "--port", str(port),
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "kcs.server:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
     ]
     log_path = f"/tmp/kcs-test-{port}.log"
     proc = subprocess.Popen(
-        cmd, stdout=open(log_path, "w"), stderr=subprocess.STDOUT, env=env,
+        cmd,
+        stdout=open(log_path, "w"),
+        stderr=subprocess.STDOUT,
+        env=env,
         cwd=Path(__file__).resolve().parent.parent,
         preexec_fn=os.setsid if sys.platform != "win32" else None,
     )

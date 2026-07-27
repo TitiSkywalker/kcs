@@ -38,8 +38,14 @@ class ShellSession:
         self.pod_name = pod_name
         self.master_fd, slave_fd = pty.openpty()
         cmd = [
-            "kubectl", "exec", "-it", pod_name,
-            "-n", namespace, "--", "/bin/sh",
+            "kubectl",
+            "exec",
+            "-it",
+            pod_name,
+            "-n",
+            namespace,
+            "--",
+            "/bin/sh",
         ]
         env = {**os.environ}
         if kubeconfig:
@@ -150,24 +156,39 @@ class ShellSession:
 
 
 def _get_target_pod(container_name: str, kubeconfig: str | None = None) -> str | None:
-    """Find the first running pod for a container using kubectl."""
+    """Find the first running pod for a container using kubectl.
+
+    Waits up to 30 s for a pod to appear and enter Running phase.
+    """
     env = {**os.environ}
     if kubeconfig:
         env["KUBECONFIG"] = kubeconfig
-    try:
-        result = subprocess.run(
-            [
-                "kubectl", "get", "pods",
-                "-l", f"app={container_name}",
-                "-o", "jsonpath={.items[0].metadata.name}",
-                "--field-selector=status.phase=Running",
-            ],
-            capture_output=True, text=True, timeout=10, env=env,
-        )
-        name = result.stdout.strip()
-        return name if name else None
-    except Exception:
-        return None
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            result = subprocess.run(
+                [
+                    "kubectl",
+                    "get",
+                    "pods",
+                    "-l",
+                    f"app={container_name}",
+                    "-o",
+                    "jsonpath={.items[0].metadata.name}",
+                    "--field-selector=status.phase=Running",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            name = result.stdout.strip()
+            if name:
+                return name
+        except Exception:
+            pass
+        time.sleep(1)
+    return None
 
 
 def _get_namespace(kubeconfig: str | None = None) -> str:
@@ -177,9 +198,11 @@ def _get_namespace(kubeconfig: str | None = None) -> str:
         env["KUBECONFIG"] = kubeconfig
     try:
         result = subprocess.run(
-            ["kubectl", "config", "view", "--minify",
-             "-o", "jsonpath={..namespace}"],
-            capture_output=True, text=True, timeout=5, env=env,
+            ["kubectl", "config", "view", "--minify", "-o", "jsonpath={..namespace}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=env,
         )
         ns = result.stdout.strip()
         return ns if ns else "default"
@@ -281,9 +304,9 @@ def _wrapper_path(container: str) -> str:
 def _ensure_wrapper(container: str, port: int) -> str:
     """Create (or refresh) the self-contained bash wrapper.  Returns its path."""
     bash_path = _wrapper_path(container)
-    content = (_WRAPPER_TEMPLATE
-               .replace("__CONTAINER__", container)
-               .replace("__PORT__", str(port)))
+    content = _WRAPPER_TEMPLATE.replace("__CONTAINER__", container).replace(
+        "__PORT__", str(port)
+    )
     try:
         with open(bash_path) as f:
             if f.read() == content:
@@ -301,16 +324,15 @@ def _ensure_wrapper(container: str, port: int) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_server(container: str, host: str = "127.0.0.1", port: int = 9876,
-               verbose: bool = False) -> None:
+def run_server(
+    container: str, host: str = "127.0.0.1", port: int = 9876, verbose: bool = False
+) -> None:
     """Start the shell proxy TCP server.
 
     Auto-creates the ~/.local/bin/kcs-bash-<container> wrapper on startup
     so CLAUDE_CODE_SHELL can point to it immediately.
     """
-    kubeconfig = os.environ.get("KUBECONFIG") or os.path.expanduser(
-        "~/.kcs/k3s.yaml"
-    )
+    kubeconfig = os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kcs/k3s.yaml")
     if not os.path.exists(kubeconfig):
         kubeconfig = "/etc/rancher/k3s/k3s.yaml"
 
@@ -332,8 +354,10 @@ def run_server(container: str, host: str = "127.0.0.1", port: int = 9876,
         server.bind((host, port))
     except OSError:
         print(f"Error: port {port} already in use", file=sys.stderr)
-        print(f"Pick another: kcs shell-proxy --container {container} --port {port + 1}",
-              file=sys.stderr)
+        print(
+            f"Pick another: kcs shell-proxy --container {container} --port {port + 1}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     server.listen(5)
@@ -365,15 +389,21 @@ def run_server(container: str, host: str = "127.0.0.1", port: int = 9876,
                 _cmd_count += 1
                 if verbose:
                     preview = command[:200].replace("\n", "\\n")
-                    print(f"\n[{_cmd_count}] CMD: {preview}"
-                          f"{'...' if len(command) > 200 else ''}",
-                          file=sys.stderr, flush=True)
+                    print(
+                        f"\n[{_cmd_count}] CMD: {preview}"
+                        f"{'...' if len(command) > 200 else ''}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 result = session.exec(command, timeout=120)
                 if verbose:
                     out_preview = result.get("stdout", "")[:120]
-                    print(f"[{_cmd_count}] EXIT={result['exit_code']}"
-                          f" OUT={out_preview!r}",
-                          file=sys.stderr, flush=True)
+                    print(
+                        f"[{_cmd_count}] EXIT={result['exit_code']}"
+                        f" OUT={out_preview!r}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 resp = json.dumps(result) + "\n"
                 conn.sendall(resp.encode("utf-8"))
         except Exception as e:
@@ -392,3 +422,129 @@ def run_server(container: str, host: str = "127.0.0.1", port: int = 9876,
         print("\nClosing shell session...", file=sys.stderr)
         session.close()
         server.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# In-process management
+# ══════════════════════════════════════════════════════════════════════════════
+
+_running: dict[int, dict] = {}
+
+
+def start(
+    container: str, host: str = "127.0.0.1", port: int = 9876, verbose: bool = False
+) -> dict:
+    """Start a shell proxy in a background thread.  Returns {port, wrapper}."""
+    if port in _running:
+        raise RuntimeError(f"Shell proxy already running on port {port}")
+
+    kubeconfig = os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kcs/k3s.yaml")
+    if not os.path.exists(kubeconfig):
+        kubeconfig = "/etc/rancher/k3s/k3s.yaml"
+
+    pod = _get_target_pod(container, kubeconfig)
+    if not pod:
+        raise RuntimeError(f"No running pod for container '{container}'")
+
+    namespace = _get_namespace(kubeconfig)
+    session = ShellSession(pod, namespace, kubeconfig)
+    wrapper = _ensure_wrapper(container, port)
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((host, port))
+    server.listen(5)
+
+    if verbose:
+        log.info(
+            "[shell-proxy:%s] listening on %s:%s, wrapper=%s",
+            container,
+            host,
+            port,
+            wrapper,
+        )
+
+    def _serve():
+        try:
+            while True:
+                conn, _addr = server.accept()
+                threading.Thread(
+                    target=_handle_conn,
+                    args=(session, conn),
+                    daemon=True,
+                ).start()
+        except OSError:
+            pass  # server closed by stop()
+        finally:
+            session.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+
+    # Wait until the port is accepting connections
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            s = socket.create_connection((host, port), timeout=0.5)
+            s.close()
+            break
+        except (OSError, ConnectionRefusedError):
+            time.sleep(0.2)
+
+    _running[port] = {
+        "container": container,
+        "host": host,
+        "thread": t,
+        "server": server,
+        "session": session,
+    }
+    return {"port": port, "wrapper": wrapper, "container": container}
+
+
+def stop(port: int) -> None:
+    """Stop a background shell proxy."""
+    entry = _running.pop(port, None)
+    if entry is None:
+        raise RuntimeError(f"No shell proxy on port {port}")
+    entry["server"].close()
+    entry["thread"].join(timeout=5)
+    # Wait for the OS to release the port
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+            s.close()
+        except (OSError, ConnectionRefusedError):
+            break
+        time.sleep(0.5)
+
+
+def list_running() -> list[dict]:
+    """Return info about all running shell proxies."""
+    return [
+        {"container": e["container"], "port": p, "host": e["host"]}
+        for p, e in _running.items()
+    ]
+
+
+def _handle_conn(session: ShellSession, conn: socket.socket) -> None:
+    """Handle one TCP client connection."""
+    try:
+        conn.settimeout(130)
+        data = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+        command = data.decode("utf-8").strip()
+        if command:
+            result = session.exec(command, timeout=120)
+            resp = json.dumps(result) + "\n"
+            conn.sendall(resp.encode("utf-8"))
+    except Exception as exc:
+        log.debug("shell-proxy handle error: %s", exc)
+    finally:
+        conn.close()

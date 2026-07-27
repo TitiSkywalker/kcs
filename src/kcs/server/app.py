@@ -14,6 +14,7 @@ from kcs import __version__
 from kcs.server.routes import (
     clusters_router,
     containers_router,
+    shell_proxy_router,
     system_router,
 )
 
@@ -38,6 +39,10 @@ def create_app() -> FastAPI:
         {
             "name": "Cluster",
             "description": "Apply declarative cluster configuration — join workers, prune stale nodes.",
+        },
+        {
+            "name": "Shell Proxy",
+            "description": "Start and stop shell proxies for CLAUDE_CODE_SHELL integration.",
         },
     ]
 
@@ -75,6 +80,7 @@ def create_app() -> FastAPI:
     app.include_router(system_router)
     app.include_router(containers_router)
     app.include_router(clusters_router)
+    app.include_router(shell_proxy_router)
 
     return app
 

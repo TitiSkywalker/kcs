@@ -248,9 +248,9 @@ def exec_container(name: str, req: ExecRequest, pod: int | None = Query(default=
     "/api/v1/containers/{name}/upload",
     summary="Upload a file into a container",
     description="Upload a file to a path inside a container. "
-                "If the target path is on a PVC backed by NFS, the file is "
-                "written directly to the NFS export on the server. "
-                "Otherwise `kubectl cp` is used as a fallback.",
+    "If the target path is on a PVC backed by NFS, the file is "
+    "written directly to the NFS export on the server. "
+    "Otherwise `kubectl cp` is used as a fallback.",
     response_description="Upload confirmation with path and size.",
     responses={
         200: {"description": "File uploaded"},
@@ -276,7 +276,10 @@ def upload_file(
     nfs_base = client.resolve_volume_path(name, parent_dir)
     if nfs_base:
         import shutil
-        dest = os.path.join(nfs_base, os.path.basename(path) if os.path.basename(path) else "")
+
+        dest = os.path.join(
+            nfs_base, os.path.basename(path) if os.path.basename(path) else ""
+        )
         if os.path.isdir(dest):
             dest = os.path.join(dest, file.filename or "upload")
         os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -290,6 +293,7 @@ def upload_file(
 
     # Fallback: kubectl cp
     import tempfile
+
     try:
         pod_name = client._get_target_pod(name)
         if not pod_name:
@@ -297,6 +301,7 @@ def upload_file(
 
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             import shutil
+
             shutil.copyfileobj(file.file, tmp)
             tmp_path = tmp.name
 
@@ -306,9 +311,10 @@ def upload_file(
             if kubeconfig:
                 env["KUBECONFIG"] = kubeconfig
             subprocess.run(
-                ["kubectl", "cp", tmp_path,
-                 f"{client.namespace}/{pod_name}:{path}"],
-                env=env, check=True, timeout=30,
+                ["kubectl", "cp", tmp_path, f"{client.namespace}/{pod_name}:{path}"],
+                env=env,
+                check=True,
+                timeout=30,
             )
         finally:
             os.unlink(tmp_path)

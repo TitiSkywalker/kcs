@@ -42,11 +42,20 @@ def start_server():
                 break
     log_path = f"/tmp/kcs-perf-{PORT}.log"
     cmd = [
-        sys.executable, "-m", "uvicorn", "kcs.server:app",
-        "--host", "127.0.0.1", "--port", str(PORT),
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "kcs.server:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(PORT),
     ]
     server_proc = subprocess.Popen(
-        cmd, stdout=open(log_path, "w"), stderr=subprocess.STDOUT, env=env,
+        cmd,
+        stdout=open(log_path, "w"),
+        stderr=subprocess.STDOUT,
+        env=env,
         cwd=Path(__file__).resolve().parent.parent,
         preexec_fn=os.setsid if sys.platform != "win32" else None,
     )
@@ -98,8 +107,9 @@ def perf(name: str, fn, runs: int = 100) -> dict:
     )
 
 
-def perf_lifecycle(label: str, session, runs: int = 10,
-                   volumes: list[str] | None = None):
+def perf_lifecycle(
+    label: str, session, runs: int = 10, volumes: list[str] | None = None
+):
     """Create + delete containers × N and measure create→ready time."""
     # Clean up leftovers from previous interrupted runs
     for i in range(runs):
@@ -181,16 +191,25 @@ def main():
         perf("GET /health", lambda: session.get(f"{BASE}/health").raise_for_status())
 
         print("\n── dashboard status ──")
-        perf("GET /status",
-             lambda: session.get(f"{BASE}/status").raise_for_status(), runs=30)
+        perf(
+            "GET /status",
+            lambda: session.get(f"{BASE}/status").raise_for_status(),
+            runs=30,
+        )
 
         print("\n── nodes ──")
-        perf("GET /nodes",
-             lambda: session.get(f"{BASE}/nodes").raise_for_status(), runs=30)
+        perf(
+            "GET /nodes",
+            lambda: session.get(f"{BASE}/nodes").raise_for_status(),
+            runs=30,
+        )
 
         print("\n── container list ──")
-        perf("GET /containers",
-             lambda: session.get(f"{BASE}/containers").raise_for_status(), runs=50)
+        perf(
+            "GET /containers",
+            lambda: session.get(f"{BASE}/containers").raise_for_status(),
+            runs=50,
+        )
 
         print("\n── container lifecycle ──")
         perf_lifecycle("deploy", session)
