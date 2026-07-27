@@ -97,36 +97,39 @@ def build(path: str, tag: str, no_push: bool) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# kcs mcp
+# kcs shell-proxy
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-@main.command()
+@main.command("shell-proxy")
 @click.option(
-    "--container", "-c", default=None, help="Pin all operations to this container"
+    "--container", "-c", required=True, help="Target container for all commands"
 )
-@click.option("--host", default="127.0.0.1", help="MCP server listen address")
-@click.option("--mcp-port", default=9999, type=int, help="MCP server listen port")
-@click.pass_context
-def mcp(ctx: click.Context, container: str | None, host: str, mcp_port: int) -> None:
-    """Start MCP server over HTTP (SSE) for coding agent integration.
+@click.option("--host", default="127.0.0.1", help="Proxy listen address")
+@click.option("--port", default=9876, type=int, help="Proxy listen port")
+@click.option("--verbose", "-v", is_flag=True, help="Log every command to stderr")
+def shell_proxy(container: str, host: str, port: int, verbose: bool) -> None:
+    """Start a shell proxy server for CLAUDE_CODE_SHELL integration.
 
-    Pin to a container so the agent doesn't need to specify one each time:
+    Auto-creates wrapper at ~/.local/bin/kcs-shell-<container>.
 
-        kcs mcp --container web
+    \b
+    1. Start the proxy (with debug output):
+         kcs shell-proxy --container web -v
 
-    Connect Claude Code by adding to ~/.claude/claude.json:
+    \b
+    2. Use with Claude Code (same terminal or another):
+         CLAUDE_CODE_SHELL=~/.local/bin/kcs-shell-web ccb
 
-        "mcpServers": { "kcs": { "url": "http://127.0.0.1:9999/sse" } }
+    \b
+    Multiple containers (each needs its own port):
+         kcs shell-proxy -c web                       # port 9876
+         kcs shell-proxy -c db --port 9877            # port 9877
+         CLAUDE_CODE_SHELL=~/.local/bin/kcs-shell-db ccb
     """
-    if "KCS_API" not in os.environ:
-        api_port = ctx.obj.get("port", 8000)
-        os.environ["KCS_API"] = f"http://localhost:{api_port}/api/v1"
-    if container:
-        os.environ["KCS_CONTAINER"] = container
-    from kcs.mcp import main as mcp_main
+    from kcs.shell_proxy import run_server
 
-    mcp_main(host=host, port=mcp_port)
+    run_server(container, host=host, port=port, verbose=verbose)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

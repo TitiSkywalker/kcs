@@ -14,7 +14,6 @@ from kcs import __version__
 from kcs.server.routes import (
     clusters_router,
     containers_router,
-    mcp_router,
     system_router,
 )
 
@@ -39,10 +38,6 @@ def create_app() -> FastAPI:
         {
             "name": "Cluster",
             "description": "Apply declarative cluster configuration — join workers, prune stale nodes.",
-        },
-        {
-            "name": "MCP",
-            "description": "Start and stop in-process MCP servers for coding-agent integration.",
         },
     ]
 
@@ -80,7 +75,6 @@ def create_app() -> FastAPI:
     app.include_router(system_router)
     app.include_router(containers_router)
     app.include_router(clusters_router)
-    app.include_router(mcp_router)
 
     return app
 

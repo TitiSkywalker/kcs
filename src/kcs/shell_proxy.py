@@ -1,0 +1,394 @@
+"""Shell proxy server — bridges Claude Code's CLAUDE_CODE_SHELL to a container.
+
+Start:  kcs shell-proxy --container web
+Then:   CLAUDE_CODE_SHELL=~/.local/bin/kcs-bash-web ccb
+
+The proxy auto-creates the wrapper script on startup.  Each container gets its
+own wrapper + port so multiple proxies can run side-by-side.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import select
+import socket
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
+log = logging.getLogger("kcs.shell_proxy")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ShellSession — persistent /bin/sh via kubectl exec PTY
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class ShellSession:
+    """A persistent /bin/sh process inside a container, accessed via PTY."""
+
+    def __init__(self, pod_name: str, namespace: str, kubeconfig: str | None):
+        import pty
+
+        self.pod_name = pod_name
+        self.master_fd, slave_fd = pty.openpty()
+        cmd = [
+            "kubectl", "exec", "-it", pod_name,
+            "-n", namespace, "--", "/bin/sh",
+        ]
+        env = {**os.environ}
+        if kubeconfig:
+            env["KUBECONFIG"] = kubeconfig
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+        self._lock = threading.Lock()
+        self._drain_output()
+        self._setup_clean_env()
+
+    def _setup_clean_env(self) -> None:
+        with self._lock:
+            os.write(self.master_fd, b"export PS1=''\n")
+            time.sleep(0.1)
+            os.write(
+                self.master_fd,
+                b"stty -echo 2>/dev/null; set +o histexpand 2>/dev/null\n",
+            )
+            time.sleep(0.1)
+            self._drain_output()
+
+    def exec(self, command: str, timeout: float = 120) -> dict:
+        with self._lock:
+            if self.proc.poll() is not None:
+                return {"stdout": "", "stderr": "", "exit_code": -1}
+
+            marker = f"__KCS_EXIT_{uuid.uuid4().hex[:8]}__"
+            full_cmd = f"{command}\necho {marker}$?\n"
+            os.write(self.master_fd, full_cmd.encode("utf-8"))
+            output = self._read_until(marker, timeout)
+
+            exit_code = 0
+            if marker in output:
+                idx = output.index(marker) + len(marker)
+                try:
+                    exit_code = int(output[idx : idx + 4].strip())
+                except ValueError:
+                    pass
+                output = output[: output.index(marker)]
+
+            output = self._clean_output(output, command)
+            return {"stdout": output, "stderr": "", "exit_code": exit_code}
+
+    @staticmethod
+    def _clean_output(raw: str, command: str) -> str:
+        cleaned = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", raw)
+        cleaned = re.sub(r"\x1b\][0-9;]*[^\x07]*\x07", "", cleaned)
+        cleaned = cleaned.replace("\r", "")
+        lines = cleaned.split("\n")
+        if lines and command.strip() in lines[0]:
+            lines = lines[1:]
+        while lines and not lines[-1].strip():
+            lines.pop()
+        return "\n".join(lines)
+
+    def _read_until(self, marker: str, timeout: float) -> str:
+        result = b""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            ready, _, _ = select.select([self.master_fd], [], [], 0.1)
+            if ready:
+                try:
+                    buf = os.read(self.master_fd, 4096)
+                except OSError:
+                    break
+                if not buf:
+                    break
+                result += buf
+                if marker.encode("utf-8") in result:
+                    break
+            if self.proc.poll() is not None:
+                break
+        return result.decode("utf-8", errors="replace")
+
+    def _drain_output(self) -> None:
+        try:
+            ready, _, _ = select.select([self.master_fd], [], [], 0.5)
+            if ready:
+                os.read(self.master_fd, 4096)
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        try:
+            os.write(self.master_fd, b"exit\n")
+        except Exception:
+            pass
+        try:
+            self.proc.wait(timeout=3)
+        except Exception:
+            self.proc.kill()
+        try:
+            os.close(self.master_fd)
+        except Exception:
+            pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TCP server
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_target_pod(container_name: str, kubeconfig: str | None = None) -> str | None:
+    """Find the first running pod for a container using kubectl."""
+    env = {**os.environ}
+    if kubeconfig:
+        env["KUBECONFIG"] = kubeconfig
+    try:
+        result = subprocess.run(
+            [
+                "kubectl", "get", "pods",
+                "-l", f"app={container_name}",
+                "-o", "jsonpath={.items[0].metadata.name}",
+                "--field-selector=status.phase=Running",
+            ],
+            capture_output=True, text=True, timeout=10, env=env,
+        )
+        name = result.stdout.strip()
+        return name if name else None
+    except Exception:
+        return None
+
+
+def _get_namespace(kubeconfig: str | None = None) -> str:
+    """Get the current kubectl namespace."""
+    env = {**os.environ}
+    if kubeconfig:
+        env["KUBECONFIG"] = kubeconfig
+    try:
+        result = subprocess.run(
+            ["kubectl", "config", "view", "--minify",
+             "-o", "jsonpath={..namespace}"],
+            capture_output=True, text=True, timeout=5, env=env,
+        )
+        ns = result.stdout.strip()
+        return ns if ns else "default"
+    except Exception:
+        return "default"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Wrapper script (auto-created on startup)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_WRAPPER_TEMPLATE = r"""#!/bin/bash
+# kcs-bash-__CONTAINER__ — forwards Claude Code bash commands to kcs container.
+# Auto-generated, port __PORT__, container __CONTAINER__.
+
+case "$(basename "$0")" in
+bash|kcs-bash-*)
+    ;;
+*)
+    echo "kcs-bash-__CONTAINER__: this script must be invoked as 'bash' or via a path containing 'bash'" >&2
+    exit 1
+    ;;
+esac
+
+cmd="${@: -1}"
+
+exec python3 - "$@" << 'PYEOF'
+import json, os, re, socket, subprocess, sys
+
+_HOST = "127.0.0.1"
+_PORT = __PORT__
+
+
+def _rpc(command):
+    sock = socket.create_connection((_HOST, _PORT), timeout=130)
+    sock.sendall((command + "\n").encode("utf-8"))
+    data = b""
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    sock.close()
+    r = json.loads(data.decode("utf-8"))
+    return r.get("stdout", ""), r.get("stderr", ""), r.get("exit_code", 0)
+
+
+def main():
+    args = sys.argv[1:]
+    cmd = None
+    i = 0
+    while i < len(args):
+        if args[i] == "-c" and i + 1 < len(args):
+            i += 1
+            if args[i] == "-l" and i + 1 < len(args):
+                i += 1
+            cmd = args[i]
+            break
+        i += 1
+    if cmd is None:
+        cmd = "exec /bin/sh"
+
+    m = re.search(r"\beval\s+'(.*)'\s*(?:<\s*/dev/null)?", cmd)
+    if m:
+        actual = m.group(1).replace("'\\''", "'")
+        cwd_m = re.search(r"pwd\s+-P\s*>\|\s*(\S+)", cmd)
+        cwd_file = cwd_m.group(1) if cwd_m else None
+        try:
+            stdout, stderr, exit_code = _rpc(actual)
+            sys.stdout.write(stdout)
+            sys.stderr.write(stderr)
+            if cwd_file:
+                pwd_out, _, pwd_rc = _rpc("pwd -P")
+                if pwd_rc == 0:
+                    os.makedirs(os.path.dirname(cwd_file), exist_ok=True)
+                    with open(cwd_file, "w") as f:
+                        f.write(pwd_out.strip() + "\n")
+            sys.exit(exit_code)
+        except Exception as e:
+            sys.stderr.write("kcs-bash-__CONTAINER__: " + str(e) + "\n")
+            sys.exit(1)
+
+    # snapshot gen or simple command, run locally
+    result = subprocess.run(["/bin/bash", "-c", cmd])
+    sys.exit(result.returncode)
+
+
+main()
+PYEOF"""
+
+
+def _wrapper_path(container: str) -> str:
+    """Default path: ~/.local/bin/kcs-bash-<container>."""
+    base = os.path.expanduser("~/.local/bin")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, f"kcs-bash-{container}")
+
+
+def _ensure_wrapper(container: str, port: int) -> str:
+    """Create (or refresh) the self-contained bash wrapper.  Returns its path."""
+    bash_path = _wrapper_path(container)
+    content = (_WRAPPER_TEMPLATE
+               .replace("__CONTAINER__", container)
+               .replace("__PORT__", str(port)))
+    try:
+        with open(bash_path) as f:
+            if f.read() == content:
+                return bash_path
+    except FileNotFoundError:
+        pass
+    with open(bash_path, "w") as f:
+        f.write(content)
+    os.chmod(bash_path, 0o755)
+    return bash_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Server entry point
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def run_server(container: str, host: str = "127.0.0.1", port: int = 9876,
+               verbose: bool = False) -> None:
+    """Start the shell proxy TCP server.
+
+    Auto-creates the ~/.local/bin/kcs-bash-<container> wrapper on startup
+    so CLAUDE_CODE_SHELL can point to it immediately.
+    """
+    kubeconfig = os.environ.get("KUBECONFIG") or os.path.expanduser(
+        "~/.kcs/k3s.yaml"
+    )
+    if not os.path.exists(kubeconfig):
+        kubeconfig = "/etc/rancher/k3s/k3s.yaml"
+
+    pod = _get_target_pod(container, kubeconfig)
+    if not pod:
+        print(f"Error: no running pod for container '{container}'", file=sys.stderr)
+        sys.exit(1)
+
+    namespace = _get_namespace(kubeconfig)
+    print(f"Opening shell to {container}/{pod} (ns={namespace})...", file=sys.stderr)
+
+    session = ShellSession(pod, namespace, kubeconfig)
+
+    wrapper = _ensure_wrapper(container, port)
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server.bind((host, port))
+    except OSError:
+        print(f"Error: port {port} already in use", file=sys.stderr)
+        print(f"Pick another: kcs shell-proxy --container {container} --port {port + 1}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    server.listen(5)
+
+    print(f"Shell proxy listening on {host}:{port}", file=sys.stderr)
+    print(f"Wrapper: {wrapper}", file=sys.stderr)
+    print(f"", file=sys.stderr)
+    print(f"  CLAUDE_CODE_SHELL={wrapper} claude", file=sys.stderr)
+    if verbose:
+        print(f"", file=sys.stderr)
+        print(f"  [verbose] logging every command to stderr", file=sys.stderr)
+
+    _cmd_count = 0
+
+    def handle(conn: socket.socket) -> None:
+        nonlocal _cmd_count
+        try:
+            conn.settimeout(130)
+            data = b""
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if b"\n" in data:
+                    break
+            command = data.decode("utf-8").strip()
+            if command:
+                _cmd_count += 1
+                if verbose:
+                    preview = command[:200].replace("\n", "\\n")
+                    print(f"\n[{_cmd_count}] CMD: {preview}"
+                          f"{'...' if len(command) > 200 else ''}",
+                          file=sys.stderr, flush=True)
+                result = session.exec(command, timeout=120)
+                if verbose:
+                    out_preview = result.get("stdout", "")[:120]
+                    print(f"[{_cmd_count}] EXIT={result['exit_code']}"
+                          f" OUT={out_preview!r}",
+                          file=sys.stderr, flush=True)
+                resp = json.dumps(result) + "\n"
+                conn.sendall(resp.encode("utf-8"))
+        except Exception as e:
+            log.error("handle error: %s", e)
+        finally:
+            conn.close()
+
+    try:
+        while True:
+            conn, addr = server.accept()
+            t = threading.Thread(target=handle, args=(conn,), daemon=True)
+            t.start()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print("\nClosing shell session...", file=sys.stderr)
+        session.close()
+        server.close()

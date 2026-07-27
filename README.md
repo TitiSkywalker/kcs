@@ -60,35 +60,27 @@ kcs exec <container> -- <command...>
 kcs ssh <container>
 ```
 
-## MCP server
+## Coding-agent integration
 
-Start an MCP server to let coding agents run commands, read files, and write
-files inside your containers.
-
-**CLI (standalone process):**
+`kcs shell-proxy` forwards Claude Code's Bash tool commands into a container
+via a persistent PTY session.  Claude Code's built-in Bash tool replaces your local shell transparently — every command runs inside the target container.
 
 ```bash
-kcs -P <api-port> mcp --container <name> --mcp-port <mcp-port>
+# Start the proxy (leave this running)
+kcs shell-proxy --container <name> -v
+
+# In another terminal, launch Claude Code:
+CLAUDE_CODE_SHELL=/home/you/.local/bin/kcs-bash-<name> claude
 ```
 
-**API (in-process):**
+The proxy auto-creates the wrapper script at `~/.local/bin/kcs-bash-<name>`.
+`CLAUDE_CODE_SHELL` tells Claude Code to use that script instead of `/bin/bash`. The script then forwards commands over TCP to the proxy.
 
+`kcs` also supports multiple containers, each on its own port:
 ```bash
-curl -X POST localhost:<api-port>/api/v1/mcp/start \
-  -H 'Content-Type: application/json' \
-  -d '{"container": "<name>", "port": <mcp-port>}'
+kcs shell-proxy -c container1 --port 9876
+kcs shell-proxy -c container2 --port 9877
 ```
-
-**Connect Claude Code** (`~/.claude/claude.json`):
-
-```json
-"mcpServers": {
-  "kcs": { "url": "http://127.0.0.1:<mcp-port>/sse" }
-}
-```
-
-Four tools exposed: `container_exec`, `container_read`, `container_write`,
-`container_list`. When `--container` is set, the container parameter is hidden from the agent — every call targets that container automatically.  Without it, the agent has to pick a container per call manually.
 
 ## Tests
 
