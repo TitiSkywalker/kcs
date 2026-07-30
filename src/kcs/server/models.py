@@ -62,7 +62,8 @@ class ClusterJoin(BaseModel):
 class WorkerNode(BaseModel):
     host: str
     user: str = "root"
-    password: str
+    password: str | None = None  # optional — prefer ssh_key
+    ssh_key: str | None = None   # path to SSH private key (e.g. ~/.ssh/id_ed25519)
 
 
 class ClusterConfig(BaseModel):

@@ -65,31 +65,64 @@ def resolve_image(image: str) -> str:
     return image
 
 
-def build_ssh_cmd(
-    target: str, remote_cmd: str, use_sshpass: bool, with_tty: bool
-) -> list[str]:
+def _run_ssh(
+    target: str,
+    remote_cmd: str,
+    *,
+    password: str | None = None,
+    need_sudo: bool = False,
+    capture: bool = True,
+    stdin_text: str | None = None,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess:
+    """Run a command on a remote host via SSH.
+
+    Password is passed through a pipe fd (sshpass -d) — never in environ.
+    The pipe is closed before this function returns.
+    """
+    sshpass_bin = shutil.which("sshpass")
+    use_sshpass = sshpass_bin is not None and password is not None
+
     if use_sshpass:
+        r_fd, w_fd = os.pipe()
+        os.write(w_fd, (password + "\n").encode())
+        os.close(w_fd)
         cmd = [
-            "sshpass",
-            "-e",
+            "sshpass", "-d", str(r_fd),
             "ssh",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
         ]
     else:
+        r_fd = None
         cmd = [
             "ssh",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
         ]
-        if with_tty:
+        if need_sudo:
             cmd.append("-t")
+
     cmd.extend([target, remote_cmd])
-    return cmd
+
+    kwargs: dict = dict(text=True, timeout=timeout)
+    if capture:
+        kwargs["capture_output"] = True
+    if stdin_text is not None:
+        kwargs["input"] = stdin_text
+    if use_sshpass:
+        kwargs["pass_fds"] = [r_fd]
+
+    try:
+        return subprocess.run(cmd, **kwargs)
+    finally:
+        if r_fd is not None:
+            try:
+                os.close(r_fd)
+            except OSError:
+                pass
+
+
 
 
 def get_server_ip_from_kubeconfig() -> str | None:
@@ -474,8 +507,7 @@ spec:
         if not server_ip or not k3s_token:
             return results
 
-        sshpass_bin = shutil.which("sshpass")
-        log.info("sshpass: %s", "found" if sshpass_bin else "not found")
+        log.info("sshpass: %s", "found" if shutil.which("sshpass") else "not found")
 
         configured_hostnames: set[str] = set()
 
@@ -495,21 +527,12 @@ spec:
 
         for w in config.workers:
             target = f"{w.user}@{w.host}"
-            env = os.environ.copy()
-            if sshpass_bin:
-                env["SSHPASS"] = w.password
-
             need_sudo = w.user != "root"
+            pw = w.password  # captured once, cleared per-iteration below
 
             log.info("Checking %s ...", target)
             try:
-                hn = subprocess.run(
-                    build_ssh_cmd(target, "hostname", sshpass_bin is not None, False),
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
+                hn = _run_ssh(target, "hostname", password=pw, timeout=15)
                 remote_hostname = hn.stdout.strip() if hn.returncode == 0 else w.host
                 log.info("Remote hostname: %s", remote_hostname)
             except Exception as e:
@@ -528,53 +551,28 @@ spec:
             if already_joined:
                 log.info("Node %s already in cluster", remote_hostname)
                 if registry_cfg:
+                    suf = "sh -c" if need_sudo else ""
                     sync_cmd = (
                         f"sudo -S -p '' sh -c '{registry_cfg}'"
-                        if (need_sudo and sshpass_bin)
-                        else (
-                            f"sudo sh -c '{registry_cfg}'"
-                            if need_sudo
-                            else registry_cfg
-                        )
+                        if need_sudo
+                        else registry_cfg
                     )
-                    sc = build_ssh_cmd(
-                        target,
-                        sync_cmd,
-                        sshpass_bin is not None,
-                        need_sudo and not sshpass_bin,
-                    )
-                    si = (w.password + "\n") if need_sudo else None
-                    subprocess.run(
-                        sc,
-                        env=env,
-                        input=si,
-                        text=True,
-                        timeout=30,
-                        capture_output=True,
-                    )
+                    sudo_pw = (pw + "\n") if need_sudo else None
+                    _run_ssh(target, sync_cmd, password=pw,
+                             need_sudo=need_sudo, stdin_text=sudo_pw, timeout=30)
                     log.info("  registry config synced")
 
                 restart_cmd = "systemctl restart k3s-agent 2>/dev/null || systemctl restart k3s 2>/dev/null"
                 if need_sudo:
-                    restart_cmd = (
-                        f"sudo -S -p '' sh -c '{restart_cmd}'"
-                        if sshpass_bin
-                        else f"sudo sh -c '{restart_cmd}'"
-                    )
-                rc = build_ssh_cmd(
-                    target,
-                    restart_cmd,
-                    sshpass_bin is not None,
-                    need_sudo and not sshpass_bin,
-                )
-                ri = (w.password + "\n") if need_sudo else None
-                subprocess.run(
-                    rc, env=env, input=ri, text=True, timeout=30, capture_output=True
-                )
+                    restart_cmd = f"sudo -S -p '' sh -c '{restart_cmd}'"
+                ri = (pw + "\n") if need_sudo else None
+                _run_ssh(target, restart_cmd, password=pw,
+                         need_sudo=need_sudo, stdin_text=ri, timeout=30)
                 log.info("  k3s-agent restarted")
 
                 results.append(f"Worker {target} ({remote_hostname}): ok")
                 configured_hostnames.add(remote_hostname)
+                pw = None  # clear
                 continue
 
             # fresh join
@@ -590,28 +588,19 @@ spec:
             install_cmd = f"{cleanup}; {registry_cfg}{install_cmd}"
 
             if need_sudo:
-                install_cmd = (
-                    f"sudo -S -p '' sh -c '{install_cmd}'"
-                    if sshpass_bin
-                    else f"sudo sh -c '{install_cmd}'"
-                )
+                install_cmd = f"sudo -S -p '' sh -c '{install_cmd}'"
 
-            ssh_cmd = build_ssh_cmd(
-                target,
-                install_cmd,
-                sshpass_bin is not None,
-                need_sudo and not sshpass_bin,
-            )
-            stdin_input = (w.password + "\n") if need_sudo else None
+            stdin_input = (pw + "\n") if need_sudo else None
 
             log.info("Joining %s via SSH ...", target)
             try:
-                result = subprocess.run(
-                    ssh_cmd, env=env, input=stdin_input, text=True, timeout=120
-                )
+                result = _run_ssh(target, install_cmd, password=pw,
+                                  need_sudo=need_sudo, stdin_text=stdin_input,
+                                  timeout=120, capture=True)
             except subprocess.TimeoutExpired:
                 log.error("SSH timeout for %s", target)
                 results.append(f"Worker {target}: SSH timeout")
+                pw = None
                 continue
 
             if result.returncode == 0:
@@ -622,6 +611,7 @@ spec:
                 results.append(f"Worker {target}: failed (exit {result.returncode})")
 
             configured_hostnames.add(remote_hostname)
+            pw = None  # clear after use
 
         pruned = self._prune_stale_workers(config, configured_hostnames)
         results.extend(pruned)
@@ -774,7 +764,6 @@ spec:
         if not cfg.workers:
             return {"message": "No workers in config"}
 
-        sshpass_bin = shutil.which("sshpass")
         results = []
 
         server_ip = None
@@ -827,35 +816,22 @@ spec:
         # 3. Install nfs-common on each worker
         for w in cfg.workers:
             target = f"{w.user}@{w.host}"
-            env = os.environ.copy()
-            if sshpass_bin:
-                env["SSHPASS"] = w.password
-
             need_sudo = w.user != "root"
+            pw = w.password
             log.info("Installing nfs-common on %s ...", target)
 
             install_cmd = "apt install nfs-common -y"
             if need_sudo:
-                install_cmd = (
-                    f"sudo -S -p '' bash -c '{install_cmd}'"
-                    if sshpass_bin
-                    else f"sudo bash -c '{install_cmd}'"
-                )
+                install_cmd = f"sudo -S -p '' bash -c '{install_cmd}'"
 
-            sc = build_ssh_cmd(
-                target,
-                install_cmd,
-                sshpass_bin is not None,
-                need_sudo and not sshpass_bin,
-            )
-            si = (w.password + "\n") if need_sudo else None
+            sudo_pw = (pw + "\n") if need_sudo else None
             try:
-                r = subprocess.run(
-                    sc, env=env, input=si, text=True, capture_output=True, timeout=60
-                )
+                r = _run_ssh(target, install_cmd, password=pw,
+                             need_sudo=need_sudo, stdin_text=sudo_pw, timeout=60)
                 ok = r.returncode == 0
             except subprocess.TimeoutExpired:
                 ok = False
+            pw = None
             results.append(f"nfs-common on {target}: {'ok' if ok else 'FAILED'}")
 
         # 4. Deploy NFS provisioner
