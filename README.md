@@ -42,40 +42,30 @@ Topology view of the entire cluster — server, workers, containers, hardware us
 
 ```bash
 kcs build -t myapp:v1 .           # build image → cluster registry
-kcs exec web -- ls -la            # run command in container
 kcs ssh web                       # interactive shell
-kcs -P 8000 shell-proxy -c web    # start shell proxy via API
 ```
 
-## Shell proxy
+## Coding agent shell
 
-Forwards Claude Code's Bash commands into a container over a Unix domain socket. Working directory and env are preserved across calls.
+Start from the dashboard (container detail → Start). A wrapper script is created at `~/.local/bin/kcs-bash-<container>`. Point Claude Code at it:
 
 ```bash
-kcs -P 8000 shell-proxy -c web
-CLAUDE_CODE_SHELL=~/.local/bin/kcs-bash-web claude
+CLAUDE_CODE_SHELL=~/.local/bin/kcs-bash-<container> claude
 ```
 
-A self-contained wrapper script is auto-created at `~/.local/bin/kcs-bash-<container>`. Sessions are isolated:
-
-```bash
-kcs -P 8000 shell-proxy -c web -s alice   # kcs-bash-web-alice
-kcs -P 8000 shell-proxy -c web -s bob     # kcs-bash-web-bob
-```
+Every Bash command now runs inside the container, with working directory and env preserved.
 
 ## Security
 
 | area | approach |
 |------|----------|
-| API auth | Bearer token (`api_key` in config or `KCS_API_KEY` env). Dashboard prompts on 401. |
-| Network | Default bind `127.0.0.1`; `--host 0.0.0.0` to expose. |
-| TLS | `--ssl-certfile`/`--ssl-keyfile` (or `KCS_SSL_CERT`/`KCS_SSL_KEY`). |
-| Rate limit | 120 req/min via slowapi. |
-| Shell proxy | Unix socket `~/.kcs/proxy-*.sock`, `0600` — kernel-enforced owner-only access. |
-| SSH | Password via pipe fd (`sshpass -d`), never in environment. Cleared after each call. |
-| NFS | `root_squash`, `755`, export restricted to worker hosts. |
-| Input | Container names RFC 1123-validated. Command args `shlex.join`-escaped. |
-| Secrets | Sudo password wiped from memory after startup. |
+| API | `api_key` required in config |
+| Network | bind `127.0.0.1` by default |
+| TLS | `--ssl-certfile`/`--ssl-keyfile` |
+| Rate limit | 120 req/min |
+| Shell proxy | Unix socket, `0600` |
+| SSH | pipe fd, never environ |
+| NFS | `root_squash`, `755`, worker-only export |
 
 ## Tests
 
