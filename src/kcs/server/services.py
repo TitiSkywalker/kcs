@@ -794,12 +794,14 @@ spec:
 
         nfs_path = cfg.nfs_path or "/srv/nfs/k3s"
 
-        # 2. Export NFS path
+        # 2. Export NFS path (restricted to known workers, no world-write, root squashed)
         log.info("Setting up NFS export %s...", nfs_path)
+        client_hosts = " ".join(f"{w.host}(rw,sync,no_subtree_check)" for w in cfg.workers)
+        export_line = f"{nfs_path} {client_hosts}"
         setup_cmds = (
             f"mkdir -p {nfs_path} && "
-            f"chmod 777 {nfs_path} && "
-            f"grep -q '{nfs_path}' /etc/exports || echo '{nfs_path} *(rw,sync,no_subtree_check,no_root_squash)' >> /etc/exports && "
+            f"chmod 755 {nfs_path} && "
+            f"grep -q '{nfs_path}' /etc/exports || echo '{export_line}' >> /etc/exports && "
             "exportfs -ra"
         )
         step2 = subprocess.run(
