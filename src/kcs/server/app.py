@@ -9,6 +9,9 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from kcs import __version__
 from kcs.server.routes import (
@@ -19,6 +22,7 @@ from kcs.server.routes import (
 )
 
 log = logging.getLogger("kcs")
+limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
 
 
 def _get_api_key() -> str | None:
@@ -62,6 +66,8 @@ def create_app() -> FastAPI:
         version=__version__,
         openapi_tags=tags_metadata,
     )
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     # Static files
     static_dir = Path(__file__).resolve().parent.parent / "static"

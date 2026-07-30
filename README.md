@@ -1,109 +1,85 @@
 <p align="center"><img src="src/kcs/static/icon.svg" width="140" alt="kcs"></p>
 
-Container controller made simpler than k3s — declarative cluster management,
-REST API, dashboard, and native coding-agent integration.
+Container controller made simpler than k3s — declarative cluster config,
+dashboard, REST API, and Claude Code shell integration.
 
-## Requirements
+## Setup
 
-- **k3s** — lightweight Kubernetes (server and all workers)
-- **kubectl** — cluster access (bundled with k3s)
-- **Python ≥ 3.12**
-
-Optional, depending on features used:
-
-| dependency | needed for |
-|---|---|
-| `docker` | `kcs build` — image builds and push to registry |
-| `sshpass` | worker join with password auth (skip if using SSH keys) |
-
-## Install
+Requires **Python ≥ 3.12**, **k3s**, and **kubectl**.
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-## Cluster management
+Optional: `docker` for image builds, `sshpass` for worker password auth.
 
-Define your entire cluster in a single config file. kcs applies it on startup — joins workers, sets up NFS shared storage, and prunes stale nodes.
+## Quick start
 
 ```bash
-kcs serve --port <api-port> --config cluster.toml
+kcs serve --port 8000 --config cluster.toml
 ```
 
 ```toml
 # cluster.toml
+api_key = "<secret>"           # required
 nfs_path = "/srv/nfs/k3s"
 
 [[workers]]
 host = "<ip>"
 user = "root"
-password = "<ssh-password>"
+password = "<ssh-password>"    # optional — uses pipe, never environ
 ```
 
-Workers already joined are skipped. Workers removed from the config are pruned. The NFS provisioner is deployed automatically so PVCs work across all nodes.
+Open `http://localhost:8000` for the dashboard, `http://localhost:8000/docs` for the API docs.
 
-## HTTP API & Dashboard
+On startup, kcs applies the config: joins workers, deploys the NFS provisioner, prunes stale nodes. Already-joined workers are skipped. No manual steps.
 
-`kcs serve --config cluster.toml` starts the API, dashboard, and cluster automation on one port. Dashboard at `http://localhost:<api-port>`, API docs at `http://localhost:<api-port>/docs`.
+## Dashboard
 
-- **Dashboard** — topology view showing server, workers, containers, hardware usage (CPU / memory / GPU progress bars), node health, and NFS status. Create, stop, start, and delete containers from the UI.
-- **API** — full CRUD for containers, image builds, cluster status. OpenAPI docs at `/docs`.  Hardware declarations (`gpus`, `cpu`, `memory`) are passed through as Kubernetes resource requests with exclusive allocation.
+Topology view of the entire cluster — server, workers, containers, hardware usage bars (CPU / memory / GPU), node health, and NFS status. Create, stop, start, scale, and delete containers from the UI. Shell proxy management with one-click start/stop and copy-to-clipboard.
+
+## CLI
 
 ```bash
-# Build an image and push to the cluster registry
-kcs build -t <image>:<tag> .
-
-# Run a command inside a container
-kcs exec <container> -- <command...>
-
-# Open an interactive shell
-kcs ssh <container>
+kcs build -t myapp:v1 .           # build image → cluster registry
+kcs exec web -- ls -la            # run command in container
+kcs ssh web                       # interactive shell
+kcs -P 8000 shell-proxy -c web    # start shell proxy via API
 ```
 
-## Coding-agent integration
+## Shell proxy
 
-`kcs shell-proxy` forwards Claude Code's Bash tool commands into a container via a persistent PTY session.  Every Bash command runs transparently inside the target container — working directory and environment variables are preserved across calls.
+Forwards Claude Code's Bash commands into a container over a Unix domain socket. Working directory and env are preserved across calls.
 
 ```bash
-# Start the proxy (leave this running)
-kcs shell-proxy --container <name> -v
-
-# In another terminal, launch Claude Code:
-CLAUDE_CODE_SHELL=~/.local/bin/kcs-bash-<name> claude
+kcs -P 8000 shell-proxy -c web
+CLAUDE_CODE_SHELL=~/.local/bin/kcs-bash-web claude
 ```
 
-The proxy auto-creates a self-contained bash script at `~/.local/bin/kcs-bash-<name>` that forwards commands over TCP to the proxy (port 9876 by default). `CLAUDE_CODE_SHELL` tells Claude Code to use it instead of `/bin/bash`.
-
-### Multiple sessions
-
-Each session gets its own PTY, port, and wrapper script — independent working directory, environment, and command history:
+A self-contained wrapper script is auto-created at `~/.local/bin/kcs-bash-<container>`. Sessions are isolated:
 
 ```bash
-kcs shell-proxy -c web -s alice
-kcs shell-proxy -c web -s bob
-# Wrappers: kcs-bash-web-alice  kcs-bash-web-bob
+kcs -P 8000 shell-proxy -c web -s alice   # kcs-bash-web-alice
+kcs -P 8000 shell-proxy -c web -s bob     # kcs-bash-web-bob
 ```
 
-### API management
+## Security
 
-Start, list, and stop proxies via the REST API (in-process with the server):
-
-```bash
-# Start
-curl -X POST localhost:8000/api/v1/shell-proxy/start \
-  -H 'Content-Type: application/json' \
-  -d '{"container": "web", "port": 9876, "session": "alice"}'
-
-# List
-curl localhost:8000/api/v1/shell-proxy
-
-# Stop
-curl -X POST "localhost:8000/api/v1/shell-proxy/stop?port=9876"
-```
+| area | approach |
+|------|----------|
+| API auth | Bearer token (`api_key` in config or `KCS_API_KEY` env). Dashboard prompts on 401. |
+| Network | Default bind `127.0.0.1`; `--host 0.0.0.0` to expose. |
+| TLS | `--ssl-certfile`/`--ssl-keyfile` (or `KCS_SSL_CERT`/`KCS_SSL_KEY`). |
+| Rate limit | 120 req/min via slowapi. |
+| Shell proxy | Unix socket `~/.kcs/proxy-*.sock`, `0600` — kernel-enforced owner-only access. |
+| SSH | Password via pipe fd (`sshpass -d`), never in environment. Cleared after each call. |
+| NFS | `root_squash`, `755`, export restricted to worker hosts. |
+| Input | Container names RFC 1123-validated. Command args `shlex.join`-escaped. |
+| Secrets | Sudo password wiped from memory after startup. |
 
 ## Tests
 
 ```bash
-pytest tests/ -v                # integration suite
+pytest tests/ -v                # 29 integration tests
 python tests/performance.py     # throughput + latency benchmarks
 ```
