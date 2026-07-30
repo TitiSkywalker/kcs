@@ -390,7 +390,8 @@ class ShellSession:
                 return {"stdout": "", "exit_code": -1}
 
             marker = f"__KCS_EXIT_{uuid.uuid4().hex[:8]}__"
-            full_cmd = f"{command}\necho {marker}$?\n"
+            # wrap in subshell so 'exit' only exits the subshell, not the pty
+            full_cmd = f"( {command} )\necho {marker}$?\n"
 
             os.write(self.master_fd, full_cmd.encode("utf-8"))
             output = self._read_until(marker, timeout)
