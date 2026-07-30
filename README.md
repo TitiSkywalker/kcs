@@ -62,24 +62,43 @@ kcs ssh <container>
 
 ## Coding-agent integration
 
-`kcs shell-proxy` forwards Claude Code's Bash tool commands into a container
-via a persistent PTY session.  Claude Code's built-in Bash tool replaces your local shell transparently — every command runs inside the target container.
+`kcs shell-proxy` forwards Claude Code's Bash tool commands into a container via a persistent PTY session.  Every Bash command runs transparently inside the target container — working directory and environment variables are preserved across calls.
 
 ```bash
 # Start the proxy (leave this running)
 kcs shell-proxy --container <name> -v
 
 # In another terminal, launch Claude Code:
-CLAUDE_CODE_SHELL=/home/you/.local/bin/kcs-bash-<name> claude
+CLAUDE_CODE_SHELL=~/.local/bin/kcs-bash-<name> claude
 ```
 
-The proxy auto-creates the wrapper script at `~/.local/bin/kcs-bash-<name>`.
-`CLAUDE_CODE_SHELL` tells Claude Code to use that script instead of `/bin/bash`. The script then forwards commands over TCP to the proxy.
+The proxy auto-creates a self-contained bash script at `~/.local/bin/kcs-bash-<name>` that forwards commands over TCP to the proxy (port 9876 by default). `CLAUDE_CODE_SHELL` tells Claude Code to use it instead of `/bin/bash`.
 
-`kcs` also supports multiple containers, each on its own port:
+### Multiple sessions
+
+Each session gets its own PTY, port, and wrapper script — independent working directory, environment, and command history:
+
 ```bash
-kcs shell-proxy -c container1 --port 9876
-kcs shell-proxy -c container2 --port 9877
+kcs shell-proxy -c web -s alice
+kcs shell-proxy -c web -s bob
+# Wrappers: kcs-bash-web-alice  kcs-bash-web-bob
+```
+
+### API management
+
+Start, list, and stop proxies via the REST API (in-process with the server):
+
+```bash
+# Start
+curl -X POST localhost:8000/api/v1/shell-proxy/start \
+  -H 'Content-Type: application/json' \
+  -d '{"container": "web", "port": 9876, "session": "alice"}'
+
+# List
+curl localhost:8000/api/v1/shell-proxy
+
+# Stop
+curl -X POST "localhost:8000/api/v1/shell-proxy/stop?port=9876"
 ```
 
 ## Tests

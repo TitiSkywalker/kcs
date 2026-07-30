@@ -14,6 +14,7 @@ class ShellProxyStartRequest(BaseModel):
     container: str
     port: int = 9876
     host: str = "127.0.0.1"
+    session: str = ""
 
 
 @router.get(
@@ -42,13 +43,13 @@ def start_proxy(req: ShellProxyStartRequest):
             container=req.container,
             host=req.host,
             port=req.port,
+            session=req.session,
         )
     except RuntimeError as e:
         msg = str(e)
-        status = 409 if "already running" in msg.lower() else 500
-        raise HTTPException(status_code=status, detail=msg)
-    except OSError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        if "already running" in msg.lower():
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=500, detail=msg)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return result

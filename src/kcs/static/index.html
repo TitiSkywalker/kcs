@@ -35,8 +35,8 @@
 	      margin-top:4px; }
   .card .summary { font-size:11px; color:var(--dim); margin-top:10px; }
 
-  .card.server { border-color:var(--accent); }
   .card.server .kind { color:var(--accent); }
+  .card.active { border-color:var(--accent); box-shadow:0 2px 12px rgba(45,75,115,.12); }
 
   .dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:4px; vertical-align:middle; }
   .dot.on { background:var(--green); }
@@ -148,10 +148,17 @@
 const A = '/api/v1';
 let data = null;
 let _view = null;
+let _proxies = [];
+let _proxyFormOpen = null;  // container name whose proxy form is open
+let _proxyFormSession = '';  // session input value to preserve across refreshes
 
 async function R() {
-  try { data = await (await fetch(A+'/status')).json(); render(); }
-  catch(e) { setTimeout(R,2000); }
+  try {
+    data = await (await fetch(A+'/status')).json();
+    try { _proxies = (await (await fetch(A+'/shell-proxy')).json()).proxies || []; }
+    catch(e) { _proxies = []; }
+    render();
+  } catch(e) { setTimeout(R,2000); }
 }
 
 async function api(method, path, body) {
@@ -185,7 +192,8 @@ function render() {
 
   h += `<svg class="lines" id="lines"></svg>`;
 
-  h += `<div class="card server" id="card-server" onclick="showServer()">
+  const sActive = _view && _view.type === 'server' ? ' active' : '';
+  h += `<div class="card server${sActive}" id="card-server" onclick="showServer()">
     <div class="kind"><span class="dot ${server.status==='Ready'?'on':'off'}"></span>server</div>
     <div class="name">${server.name}</div>
     <div class="ip">${server.ip}</div>
@@ -203,7 +211,8 @@ function render() {
       if (wr.cpu) wSum += ` · ${fmtCPU(wu.cpu||0)}/${fmtCPU(wr.cpu)} cpu`;
       if (wr.gpu > 0) wSum += ` · ${wu.gpu||0}/${wr.gpu} gpu`;
       if (w.disk_pressure) wSum += ` · <span style="color:var(--red)">disk</span>`;
-      h += `<div class="card" id="card-w${i}" onclick="showWorker(${i})">
+      const wActive = _view && _view.type === 'worker' && _view.i === i ? ' active' : '';
+      h += `<div class="card${wActive}" id="card-w${i}" onclick="showWorker(${i})">
 	<div class="kind"><span class="dot ${w.status==='Ready'?'on':'off'}"></span>worker</div>
 	<div class="name">${w.name}</div>
 	<div class="ip">${w.ip}</div>
@@ -294,8 +303,22 @@ function open(html) {
 }
 
 function closePanel() {
+  _view = null;
+  _proxyFormOpen = null;
+  highlightCard();
   document.getElementById('p').classList.remove('show');
   document.body.classList.remove('panel-open');
+}
+
+function highlightCard() {
+  document.querySelectorAll('.card.active').forEach(c => c.classList.remove('active'));
+  if (!_view) return;
+  if (_view.type === 'server') {
+    document.getElementById('card-server').classList.add('active');
+  } else if (_view.type === 'worker') {
+    const el = document.getElementById('card-w' + _view.i);
+    if (el) el.classList.add('active');
+  }
 }
 
 function drawLines() {
@@ -353,6 +376,7 @@ function containerActs(c) {
 
 function showServer() {
   _view = {type:'server'};
+  highlightCard();
   const {server, images, containers} = data;
   open(`
     <h3>server</h3>
@@ -387,6 +411,7 @@ function showServer() {
 
 function showWorker(i) {
   _view = {type:'worker', i};
+  highlightCard();
   const w = window._workers[i];
   const pods = data.containers.filter(c => c.node && c.node === w.ip);
   open(`
@@ -462,6 +487,35 @@ async function showContainer(name) {
       ${vols}
       ${envs}
       ${!hasHW && !c.volumes?.length && !Object.keys(c.env||{}).length && !c.ports?.length ? '<div class="empty">no hardware, volumes, ports, or env vars</div>' : ''}
+      <h4>shell proxy</h4>
+      ${(() => {
+        const mine = _proxies.filter(p => p.container === c.name);
+        let h = '';
+        if (mine.length) {
+          h += mine.map(p => `<div class="item" style="flex-direction:column;align-items:flex-start;gap:2px">
+            <div style="display:flex;align-items:center;gap:8px;width:100%">
+              <span style="flex:1;font-family:monospace;font-size:10px;word-break:break-all">CLAUDE_CODE_SHELL=${p.wrapper} claude</span>
+              <span class="item-acts">
+                <button onclick="event.stopPropagation();stopProxy(${p.port})" class="danger" title="stop proxy">✕</button>
+              </span>
+            </div>
+            <span style="font-size:9px;color:var(--dim)">${p.host}:${p.port}${p.session ? ' · session: '+p.session : ''}</span>
+          </div>`).join('');
+        } else {
+          h += '<div class="empty">no proxy running</div>';
+        }
+        const pfId = c.name.replace(/[^a-zA-Z0-9]/g, '');
+        const pfOpen = _proxyFormOpen === c.name;
+        h += `<button class="btn primary" style="margin-top:6px;display:${pfOpen?'none':''}" onclick="event.stopPropagation();toggleProxyForm('${c.name}')">Start Shell Proxy</button>
+        <div id="pf-${pfId}" style="display:${pfOpen?'':'none'};margin-top:4px">
+          <input id="pfi-${pfId}" placeholder="session name (optional)" value="${pfOpen ? _proxyFormSession.replace(/"/g,'&quot;') : ''}" oninput="_proxyFormSession=this.value" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:5px;font:11px/1.4 -apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',sans-serif;background:var(--bg);color:var(--text);outline:none;margin-bottom:4px">
+          <div style="display:flex;gap:4px">
+            <button class="btn primary" style="flex:1;font-size:10px;padding:4px 0" onclick="event.stopPropagation();doStartProxy('${c.name}')">Start</button>
+            <button style="flex:1;font-size:10px;padding:4px 0;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer" onclick="event.stopPropagation();hideProxyForm('${c.name}')">Cancel</button>
+          </div>
+        </div>`;
+        return h;
+      })()}
       <div style="margin-top:16px;display:flex;gap:6px">
         ${c.status === 'running' ? `<button class="btn primary" style="flex:1" onclick="doStop('${c.name}')">Stop</button>` : ''}
         ${c.status === 'stopped' ? `<button class="btn primary" style="flex:1" onclick="doStart('${c.name}')">Start</button>` : ''}
@@ -564,6 +618,50 @@ async function doDelete(name) {
       refreshPanel();
     }
   } catch(e) { alert('Delete failed: ' + e.message); }
+}
+
+function toggleProxyForm(name) {
+  _proxyFormOpen = name;
+  _proxyFormSession = '';
+  const id = name.replace(/[^a-zA-Z0-9]/g, '');
+  const btn = document.querySelector('#pb button[onclick*="toggleProxyForm"]');
+  const form = document.getElementById('pf-' + id);
+  if (btn) btn.style.display = 'none';
+  if (form) form.style.display = '';
+  const input = document.getElementById('pfi-' + id);
+  if (input) setTimeout(() => input.focus(), 50);
+}
+
+function hideProxyForm(name) {
+  _proxyFormOpen = null;
+  _proxyFormSession = '';
+  const id = name.replace(/[^a-zA-Z0-9]/g, '');
+  const btn = document.querySelector('#pb button[onclick*="toggleProxyForm"]');
+  const form = document.getElementById('pf-' + id);
+  if (btn) btn.style.display = '';
+  if (form) form.style.display = 'none';
+}
+
+async function doStartProxy(name) {
+  const session = _proxyFormSession.trim();
+  _proxyFormSession = '';
+  hideProxyForm(name);
+  let port = 9876;
+  const used = _proxies.map(p => p.port);
+  while (used.includes(port)) port++;
+  try {
+    const r = await api('POST', '/shell-proxy/start', {container: name, port, host: '127.0.0.1', session});
+    await R();
+    if (_view.type === 'container') showContainer(_view.name);
+  } catch(e) { alert('Proxy start failed: ' + e.message); }
+}
+
+async function stopProxy(port) {
+  try {
+    await api('POST', `/shell-proxy/stop?port=${port}`);
+    await R();
+    if (_view.type === 'container') showContainer(_view.name);
+  } catch(e) { alert('Proxy stop failed: ' + e.message); }
 }
 
 async function doDeleteImage(tag) {

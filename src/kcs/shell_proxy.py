@@ -80,7 +80,8 @@ class ShellSession:
                 return {"stdout": "", "stderr": "", "exit_code": -1}
 
             marker = f"__KCS_EXIT_{uuid.uuid4().hex[:8]}__"
-            full_cmd = f"{command}\necho {marker}$?\n"
+            # wrap in subshell so 'exit' only exits the subshell, not the pty
+            full_cmd = f"( {command} )\necho {marker}$?\n"
             os.write(self.master_fd, full_cmd.encode("utf-8"))
             output = self._read_until(marker, timeout)
 
@@ -265,46 +266,53 @@ def main():
     if cmd is None:
         cmd = "exec /bin/sh"
 
-    m = re.search(r"\beval\s+'(.*)'\s*(?:<\s*/dev/null)?", cmd)
-    if m:
-        actual = m.group(1).replace("'\\''", "'")
-        cwd_m = re.search(r"pwd\s+-P\s*>\|\s*(\S+)", cmd)
-        cwd_file = cwd_m.group(1) if cwd_m else None
-        try:
-            stdout, stderr, exit_code = _rpc(actual)
-            sys.stdout.write(stdout)
-            sys.stderr.write(stderr)
-            if cwd_file:
-                pwd_out, _, pwd_rc = _rpc("pwd -P")
-                if pwd_rc == 0:
-                    os.makedirs(os.path.dirname(cwd_file), exist_ok=True)
-                    with open(cwd_file, "w") as f:
-                        f.write(pwd_out.strip() + "\n")
-            sys.exit(exit_code)
-        except Exception as e:
-            sys.stderr.write("kcs-bash-__CONTAINER__: " + str(e) + "\n")
-            sys.exit(1)
+    # snapshot generation must run locally to capture host environment
+    if "SNAPSHOT_FILE" in cmd:
+        result = subprocess.run(["/bin/bash", "-c", cmd])
+        sys.exit(result.returncode)
 
-    # snapshot gen or simple command, run locally
-    result = subprocess.run(["/bin/bash", "-c", cmd])
-    sys.exit(result.returncode)
+    # Try to extract the actual command from eval wrappers
+    m = re.search(r"\beval\s+(['\"])(.*?)\1\s*(?:<\s*/dev/null)?", cmd)
+    actual = m.group(2) if m else cmd
+    if m:
+        actual = actual.replace("'\\''", "'")
+    cwd_m = re.search(r"pwd\s+-P\s*>\|\s*(\S+)", cmd)
+    cwd_file = cwd_m.group(1) if cwd_m else None
+    try:
+        stdout, stderr, exit_code = _rpc(actual)
+        sys.stdout.write(stdout)
+        sys.stderr.write(stderr)
+        if cwd_file:
+            pwd_out, _, pwd_rc = _rpc("pwd -P")
+            if pwd_rc == 0:
+                os.makedirs(os.path.dirname(cwd_file), exist_ok=True)
+                with open(cwd_file, "w") as f:
+                    f.write(pwd_out.strip() + "\n")
+        sys.exit(exit_code)
+    except Exception as e:
+        sys.stderr.write("kcs-bash-__CONTAINER__: " + str(e) + "\n")
+        sys.exit(1)
 
 
 main()
 PYEOF"""
 
 
-def _wrapper_path(container: str) -> str:
-    """Default path: ~/.local/bin/kcs-bash-<container>."""
+def _wrapper_path(container: str, session: str = "") -> str:
+    """Default path: ~/.local/bin/kcs-bash-<container>[-<session>]."""
     base = os.path.expanduser("~/.local/bin")
     os.makedirs(base, exist_ok=True)
-    return os.path.join(base, f"kcs-bash-{container}")
+    name = f"kcs-bash-{container}"
+    if session:
+        name += f"-{session}"
+    return os.path.join(base, name)
 
 
-def _ensure_wrapper(container: str, port: int) -> str:
+def _ensure_wrapper(container: str, port: int, session: str = "") -> str:
     """Create (or refresh) the self-contained bash wrapper.  Returns its path."""
-    bash_path = _wrapper_path(container)
-    content = _WRAPPER_TEMPLATE.replace("__CONTAINER__", container).replace(
+    bash_path = _wrapper_path(container, session)
+    label = f"{container}/{session}" if session else container
+    content = _WRAPPER_TEMPLATE.replace("__CONTAINER__", label).replace(
         "__PORT__", str(port)
     )
     try:
@@ -324,13 +332,43 @@ def _ensure_wrapper(container: str, port: int) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_server(
-    container: str, host: str = "127.0.0.1", port: int = 9876, verbose: bool = False
-) -> None:
-    """Start the shell proxy TCP server.
+def _try_register_with_api(container: str, host: str, port: int, api_port: int = 8000) -> None:
+    """Notify the local kcs API server about this proxy (best-effort)."""
+    api_port = int(os.environ.get("KCS_PORT", str(api_port)))
+    api_base = os.environ.get("KCS_API", f"http://localhost:{api_port}/api/v1")
+    try:
+        import requests
+        requests.post(
+            f"{api_base}/shell-proxy/start",
+            json={"container": container, "host": host, "port": port},
+            timeout=2,
+        )
+    except Exception:
+        pass
 
-    Auto-creates the ~/.local/bin/kcs-bash-<container> wrapper on startup
-    so CLAUDE_CODE_SHELL can point to it immediately.
+
+def _try_unregister_with_api(port: int, api_port: int = 8000) -> None:
+    """Tell the local kcs API server this proxy is shutting down (best-effort)."""
+    api_port = int(os.environ.get("KCS_PORT", str(api_port)))
+    api_base = os.environ.get("KCS_API", f"http://localhost:{api_port}/api/v1")
+    try:
+        import requests
+        requests.post(f"{api_base}/shell-proxy/stop?port={port}", timeout=2)
+    except Exception:
+        pass
+
+
+def run_server(
+    container: str,
+    host: str = "127.0.0.1",
+    port: int = 9876,
+    verbose: bool = False,
+    session: str = "",
+    api_port: int = 8000,
+) -> None:
+    """Start the shell proxy TCP server (blocking — for CLI use).
+
+    Registers with the API server at *api_port* so the dashboard discovers it.
     """
     kubeconfig = os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kcs/k3s.yaml")
     if not os.path.exists(kubeconfig):
@@ -344,9 +382,8 @@ def run_server(
     namespace = _get_namespace(kubeconfig)
     print(f"Opening shell to {container}/{pod} (ns={namespace})...", file=sys.stderr)
 
-    session = ShellSession(pod, namespace, kubeconfig)
-
-    wrapper = _ensure_wrapper(container, port)
+    session_obj = ShellSession(pod, namespace, kubeconfig)
+    wrapper = _ensure_wrapper(container, port, session)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -354,10 +391,6 @@ def run_server(
         server.bind((host, port))
     except OSError:
         print(f"Error: port {port} already in use", file=sys.stderr)
-        print(
-            f"Pick another: kcs shell-proxy --container {container} --port {port + 1}",
-            file=sys.stderr,
-        )
         sys.exit(1)
 
     server.listen(5)
@@ -366,8 +399,11 @@ def run_server(
     print(f"Wrapper: {wrapper}", file=sys.stderr)
     print(f"", file=sys.stderr)
     print(f"  CLAUDE_CODE_SHELL={wrapper} claude", file=sys.stderr)
+
+    # Register with the local API server so the dashboard can discover this proxy
+    _try_register_with_api(container, host, port, api_port)
+
     if verbose:
-        print(f"", file=sys.stderr)
         print(f"  [verbose] logging every command to stderr", file=sys.stderr)
 
     _cmd_count = 0
@@ -389,21 +425,15 @@ def run_server(
                 _cmd_count += 1
                 if verbose:
                     preview = command[:200].replace("\n", "\\n")
-                    print(
-                        f"\n[{_cmd_count}] CMD: {preview}"
-                        f"{'...' if len(command) > 200 else ''}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                result = session.exec(command, timeout=120)
+                    print(f"\n[{_cmd_count}] CMD: {preview}"
+                          f"{'...' if len(command) > 200 else ''}",
+                          file=sys.stderr, flush=True)
+                result = session_obj.exec(command, timeout=120)
                 if verbose:
                     out_preview = result.get("stdout", "")[:120]
-                    print(
-                        f"[{_cmd_count}] EXIT={result['exit_code']}"
-                        f" OUT={out_preview!r}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                    print(f"[{_cmd_count}] EXIT={result['exit_code']}"
+                          f" OUT={out_preview!r}",
+                          file=sys.stderr, flush=True)
                 resp = json.dumps(result) + "\n"
                 conn.sendall(resp.encode("utf-8"))
         except Exception as e:
@@ -420,7 +450,8 @@ def run_server(
         pass
     finally:
         print("\nClosing shell session...", file=sys.stderr)
-        session.close()
+        _try_unregister_with_api(port, api_port)
+        session_obj.close()
         server.close()
 
 
@@ -432,7 +463,11 @@ _running: dict[int, dict] = {}
 
 
 def start(
-    container: str, host: str = "127.0.0.1", port: int = 9876, verbose: bool = False
+    container: str,
+    host: str = "127.0.0.1",
+    port: int = 9876,
+    verbose: bool = False,
+    session: str = "",
 ) -> dict:
     """Start a shell proxy in a background thread.  Returns {port, wrapper}."""
     if port in _running:
@@ -447,13 +482,18 @@ def start(
         raise RuntimeError(f"No running pod for container '{container}'")
 
     namespace = _get_namespace(kubeconfig)
-    session = ShellSession(pod, namespace, kubeconfig)
-    wrapper = _ensure_wrapper(container, port)
+    wrapper = _ensure_wrapper(container, port, session)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((host, port))
+    try:
+        server.bind((host, port))
+    except OSError:
+        # Port already in use — register externally-started proxy
+        _running[port] = {"container": container, "host": host}
+        return {"port": port, "wrapper": wrapper, "container": container}
     server.listen(5)
+    shell_sess = ShellSession(pod, namespace, kubeconfig)
 
     if verbose:
         log.info(
@@ -470,13 +510,13 @@ def start(
                 conn, _addr = server.accept()
                 threading.Thread(
                     target=_handle_conn,
-                    args=(session, conn),
+                    args=(shell_sess, conn),
                     daemon=True,
                 ).start()
         except OSError:
             pass  # server closed by stop()
         finally:
-            session.close()
+            shell_sess.close()
 
     t = threading.Thread(target=_serve, daemon=True)
     t.start()
@@ -506,23 +546,33 @@ def stop(port: int) -> None:
     entry = _running.pop(port, None)
     if entry is None:
         raise RuntimeError(f"No shell proxy on port {port}")
-    entry["server"].close()
-    entry["thread"].join(timeout=5)
-    # Wait for the OS to release the port
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        try:
-            s = socket.create_connection(("127.0.0.1", port), timeout=0.2)
-            s.close()
-        except (OSError, ConnectionRefusedError):
-            break
-        time.sleep(0.5)
+    server = entry.get("server")
+    thread = entry.get("thread")
+    if server:
+        server.close()
+    if thread:
+        thread.join(timeout=5)
+    if server:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                s = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+                s.close()
+            except (OSError, ConnectionRefusedError):
+                break
+            time.sleep(0.5)
 
 
 def list_running() -> list[dict]:
     """Return info about all running shell proxies."""
     return [
-        {"container": e["container"], "port": p, "host": e["host"]}
+        {
+            "container": e["container"],
+            "port": p,
+            "host": e["host"],
+            "session": e.get("session", ""),
+            "wrapper": _wrapper_path(e["container"], e.get("session", "")),
+        }
         for p, e in _running.items()
     ]
 

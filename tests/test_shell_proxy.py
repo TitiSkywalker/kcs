@@ -94,16 +94,17 @@ def test_wrapper_idempotent():
 
 
 def test_wrapper_fallback_local():
-    """Commands without 'eval' run locally via /bin/bash."""
+    """Commands without 'eval' are forwarded to the proxy."""
     wrapper = _ensure_wrapper("test-container", 19999)
     proc = subprocess.run(
-        [wrapper, "-c", "echo LOCAL_ONLY"],
+        [wrapper, "-c", "echo NON_EVAL_FORWARDED"],
         capture_output=True,
         text=True,
         timeout=10,
     )
-    assert proc.returncode == 0
-    assert "LOCAL_ONLY" in proc.stdout
+    # No proxy on 19999 → connection refused (expected, not a local fallback)
+    assert proc.returncode != 0
+    assert "Connection refused" in proc.stderr
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -178,7 +179,7 @@ class TestWrapperForwarding:
         assert r.status_code == 201, r.text
         time.sleep(1)
 
-        proc = _invoke_wrapper("echo hello-from-wrapper")
+        proc = _invoke_wrapper("echo hello-from-wrapper", cwd_file=f"/tmp/kcs-test-fwd-{os.getpid()}")
         assert proc.returncode == 0, f"stderr: {proc.stderr}"
         assert "hello-from-wrapper" in proc.stdout
 

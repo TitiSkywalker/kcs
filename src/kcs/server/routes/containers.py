@@ -123,6 +123,14 @@ def remove_container(name: str, force: bool = Query(default=False)):
     """Delete a container and its resources."""
     client = get_service().get_client()
     if client.remove(name, force=force):
+        # Clean up any shell proxies for this container
+        from kcs import shell_proxy
+        for p in shell_proxy.list_running():
+            if p["container"] == name:
+                try:
+                    shell_proxy.stop(p["port"])
+                except Exception:
+                    pass
         return {"message": f"Container '{name}' removed"}
     raise HTTPException(status_code=404, detail=f"Container '{name}' not found")
 

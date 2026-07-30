@@ -62,7 +62,10 @@ def main(ctx: click.Context, port: int) -> None:
 @click.option("--port", envvar="KCS_PORT", default=8000, type=int)
 @click.option("-c", "--config", default=None, help="Cluster config file (.toml/.yaml)")
 @click.option("--log-file", default=None)
-def serve(host: str, port: int, config: str | None, log_file: str | None) -> None:
+@click.option("-v", "--verbose", is_flag=True, help="Enable DEBUG-level logging")
+@click.option("--no-nfs", is_flag=True, help="Skip NFS setup even when --config is provided")
+def serve(host: str, port: int, config: str | None, log_file: str | None,
+          verbose: bool, no_nfs: bool) -> None:
     """Start API server + Dashboard."""
     from kcs.server.main import main as server_main
 
@@ -71,6 +74,10 @@ def serve(host: str, port: int, config: str | None, log_file: str | None) -> Non
         sys.argv.extend(["--config", config])
     if log_file:
         sys.argv.extend(["--log-file", log_file])
+    if verbose:
+        sys.argv.append("--verbose")
+    if no_nfs:
+        sys.argv.append("--no-nfs")
     server_main()
 
 
@@ -107,29 +114,34 @@ def build(path: str, tag: str, no_push: bool) -> None:
 )
 @click.option("--host", default="127.0.0.1", help="Proxy listen address")
 @click.option("--port", default=9876, type=int, help="Proxy listen port")
+@click.option("--session", "-s", default="", help="Session label (for multiple proxies per container)")
 @click.option("--verbose", "-v", is_flag=True, help="Log every command to stderr")
-def shell_proxy(container: str, host: str, port: int, verbose: bool) -> None:
+@click.pass_context
+def shell_proxy(
+    ctx: click.Context, container: str, host: str, port: int, session: str, verbose: bool
+) -> None:
     """Start a shell proxy server for CLAUDE_CODE_SHELL integration.
 
-    Auto-creates wrapper at ~/.local/bin/kcs-shell-<container>.
+    Auto-creates wrapper at ~/.local/bin/kcs-bash-<container>[-<session>].
 
     \b
-    1. Start the proxy (with debug output):
-         kcs shell-proxy --container web -v
+    1. Start the proxy:
+         kcs -P 8888 shell-proxy --container web -v
 
     \b
-    2. Use with Claude Code (same terminal or another):
-         CLAUDE_CODE_SHELL=~/.local/bin/kcs-shell-web ccb
+    2. Use with Claude Code:
+         CLAUDE_CODE_SHELL=~/.local/bin/kcs-bash-web claude
 
     \b
-    Multiple containers (each needs its own port):
-         kcs shell-proxy -c web                       # port 9876
-         kcs shell-proxy -c db --port 9877            # port 9877
-         CLAUDE_CODE_SHELL=~/.local/bin/kcs-shell-db ccb
+    Multiple sessions per container:
+         kcs -P 8888 shell-proxy -c web -s alice
+         kcs -P 8888 shell-proxy -c web -s bob --port 9877
     """
     from kcs.shell_proxy import run_server
 
-    run_server(container, host=host, port=port, verbose=verbose)
+    api_port = ctx.obj.get("port", 8000)
+    run_server(container, host=host, port=port, verbose=verbose, session=session,
+               api_port=api_port)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

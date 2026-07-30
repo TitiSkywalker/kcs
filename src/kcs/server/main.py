@@ -15,12 +15,6 @@ log = logging.getLogger("kcs")
 
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
     parser = argparse.ArgumentParser(description="kcs HTTP API server")
     parser.add_argument(
         "--host",
@@ -44,7 +38,27 @@ def main():
         default=os.environ.get("KCS_LOG_FILE"),
         help="Log file path (env: KCS_LOG_FILE)",
     )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        default=False,
+        help="Enable DEBUG-level logging",
+    )
+    parser.add_argument(
+        "--no-nfs",
+        action="store_true",
+        default=False,
+        help="Skip NFS setup even when --config is provided",
+    )
     args = parser.parse_args()
+
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     if args.log_file:
         fh = logging.FileHandler(args.log_file)
@@ -84,6 +98,16 @@ def main():
             results = svc.apply_config()
             for r in results:
                 log.info("  %s", r)
+
+            if not args.no_nfs:
+                log.info("Setting up NFS...")
+                try:
+                    nfs_result = svc.setup_nfs()
+                    log.info("NFS: %s", nfs_result.get("message"))
+                    for r in nfs_result.get("results", []):
+                        log.info("  %s", r)
+                except Exception as e:
+                    log.warning("NFS setup skipped: %s", e)
         except Exception as e:
             log.error("  %s", e)
             sys.exit(1)
