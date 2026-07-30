@@ -18,8 +18,8 @@ def main():
     parser = argparse.ArgumentParser(description="kcs HTTP API server")
     parser.add_argument(
         "--host",
-        default=os.environ.get("KCS_HOST", "0.0.0.0"),
-        help="Listen address (env: KCS_HOST, default: 0.0.0.0)",
+        default=os.environ.get("KCS_HOST", "127.0.0.1"),
+        help="Listen address (env: KCS_HOST, default: 127.0.0.1)",
     )
     parser.add_argument(
         "--port",
@@ -50,6 +50,11 @@ def main():
         action="store_true",
         default=False,
         help="Skip NFS setup even when --config is provided",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("KCS_API_KEY"),
+        help="API authentication key (env: KCS_API_KEY)",
     )
     args = parser.parse_args()
 
@@ -94,6 +99,10 @@ def main():
                     config.sudo_password = pw
                 print()
 
+            # CLI flag / env var overrides config file
+            if args.api_key:
+                config.api_key = args.api_key
+
             set_service_config(config)
             results = svc.apply_config()
             for r in results:
@@ -108,11 +117,18 @@ def main():
                         log.info("  %s", r)
                 except Exception as e:
                     log.warning("NFS setup skipped: %s", e)
+
+            # Wipe sudo password from memory — no longer needed
+            config.sudo_password = None
         except Exception as e:
             log.error("  %s", e)
             sys.exit(1)
 
         log.info("Checking cluster health...")
         get_service().repair()
+    elif args.api_key:
+        # Auth key set but no config file — configure auth only
+        from kcs.server.models import ClusterConfig
+        set_service_config(ClusterConfig(api_key=args.api_key))
 
     uvicorn.run("kcs.server:app", host=args.host, port=args.port, reload=False)

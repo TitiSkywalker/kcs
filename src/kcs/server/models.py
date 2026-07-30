@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+import re
+
+from pydantic import BaseModel, field_validator
+
+
+# RFC 1123: lowercase alphanumeric + '-' + '.', start/end alphanumeric, max 253 chars
+_CONTAINER_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
 
 
 class ContainerCreate(BaseModel):
@@ -16,6 +22,20 @@ class ContainerCreate(BaseModel):
     gpus: int | None = None  # number of GPUs (nvidia.com/gpu), exclusive
     cpu: str | None = None  # e.g. "1", "500m", "2"
     memory: str | None = None  # e.g. "512Mi", "1Gi"
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if len(v) > 253:
+            raise ValueError("container name must be <= 253 characters")
+        if not _CONTAINER_NAME_RE.match(v):
+            raise ValueError(
+                "container name must be RFC 1123 compliant: "
+                "lowercase letters, digits, hyphens, dots; start and end with alphanumeric"
+            )
+        return v
 
 
 class ScaleRequest(BaseModel):
@@ -47,6 +67,7 @@ class WorkerNode(BaseModel):
 
 class ClusterConfig(BaseModel):
     backend: str = "k3s"  # k3s (host) or k3d
+    api_key: str | None = None  # shared secret for API auth (env: KCS_API_KEY)
     sudo_password: str | None = None  # local sudo password (for reading token, etc.)
     nfs_path: str = (
         "/srv/nfs/k3s"  # NFS export path, use data disk if system disk is small

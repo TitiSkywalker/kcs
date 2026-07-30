@@ -218,7 +218,9 @@ class ClusterService:
         workers = [WorkerNode(**w) for w in raw.get("workers", [])]
         return ClusterConfig(
             backend=raw.get("backend", "k3s"),
+            api_key=raw.get("api_key"),
             sudo_password=raw.get("sudo_password"),
+            nfs_path=raw.get("nfs_path", "/srv/nfs/k3s"),
             workers=workers,
         )
 

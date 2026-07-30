@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import shlex
 import subprocess
 import time
 
@@ -56,7 +58,9 @@ def create_container(req: ContainerCreate):
 
     name = req.name
     if not name:
-        name = image.rsplit("/", 1)[-1].split(":")[0].replace("_", "-")
+        name = image.rsplit("/", 1)[-1].split(":")[0]
+        # Sanitize to RFC 1123: lowercase, replace underscores/slashes with hyphens
+        name = re.sub(r"[^a-zA-Z0-9.-]", "-", name).lower().strip("-.")
 
     env_dict = req.env or {}
     volumes = []
@@ -516,7 +520,7 @@ def shell_session_exec(name: str, sid: str, req: ExecRequest):
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
-        result = session.exec(" ".join(req.command))
+        result = session.exec(shlex.join(req.command))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

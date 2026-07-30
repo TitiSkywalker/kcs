@@ -14,13 +14,40 @@ from kcs import __version__
 console = Console()
 
 
+def _get_api_key() -> str | None:
+    """Read API key from env var or cluster config."""
+    key = os.environ.get("KCS_API_KEY")
+    if key:
+        return key
+    # Try cluster config
+    for path in (
+        os.path.expanduser("~/.kcs/cluster.toml"),
+        "cluster.toml",
+        "local/cluster.toml",
+    ):
+        if os.path.exists(path):
+            try:
+                import tomllib
+                with open(path, "rb") as f:
+                    raw = tomllib.load(f)
+                return raw.get("api_key")
+            except Exception:
+                pass
+    return None
+
+
 def _api(path: str, method: str = "GET", json_data=None, params=None, stream=False):
     ctx = click.get_current_context()
     port = ctx.obj.get("port", 8000)
     url = f"http://localhost:{port}/api/v1{path}"
+    headers = {}
+    api_key = _get_api_key()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     try:
         r = requests.request(
-            method, url, json=json_data, params=params, stream=stream, timeout=120
+            method, url, json=json_data, params=params, headers=headers,
+            stream=stream, timeout=120
         )
     except requests.ConnectionError:
         raise click.ClickException(
@@ -58,14 +85,15 @@ def main(ctx: click.Context, port: int) -> None:
 
 
 @main.command()
-@click.option("--host", envvar="KCS_HOST", default="0.0.0.0")
+@click.option("--host", envvar="KCS_HOST", default="127.0.0.1")
 @click.option("--port", envvar="KCS_PORT", default=8000, type=int)
 @click.option("-c", "--config", default=None, help="Cluster config file (.toml/.yaml)")
 @click.option("--log-file", default=None)
 @click.option("-v", "--verbose", is_flag=True, help="Enable DEBUG-level logging")
 @click.option("--no-nfs", is_flag=True, help="Skip NFS setup even when --config is provided")
+@click.option("--api-key", envvar="KCS_API_KEY", default=None, help="API authentication key")
 def serve(host: str, port: int, config: str | None, log_file: str | None,
-          verbose: bool, no_nfs: bool) -> None:
+          verbose: bool, no_nfs: bool, api_key: str | None) -> None:
     """Start API server + Dashboard."""
     from kcs.server.main import main as server_main
 
@@ -78,6 +106,8 @@ def serve(host: str, port: int, config: str | None, log_file: str | None,
         sys.argv.append("--verbose")
     if no_nfs:
         sys.argv.append("--no-nfs")
+    if api_key:
+        sys.argv.extend(["--api-key", api_key])
     server_main()
 
 

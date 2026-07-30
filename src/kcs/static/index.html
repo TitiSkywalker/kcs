@@ -163,6 +163,7 @@ async function R() {
 
 async function api(method, path, body) {
   const opts = {method, headers:{'Content-Type':'application/json'}};
+  if (window.__KCS_API_KEY) opts.headers['Authorization'] = 'Bearer ' + window.__KCS_API_KEY;
   if (body) opts.body = JSON.stringify(body);
   const r = await fetch(A+path, opts);
   if (!r.ok) {

@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from kcs import __version__
@@ -19,6 +19,16 @@ from kcs.server.routes import (
 )
 
 log = logging.getLogger("kcs")
+
+
+def _get_api_key() -> str | None:
+    """Read the configured API key from the cluster config (if any)."""
+    from kcs.server.services import get_service
+
+    svc = get_service()
+    if svc.cluster_config and svc.cluster_config.api_key:
+        return svc.cluster_config.api_key
+    return None
 
 
 def create_app() -> FastAPI:
@@ -60,7 +70,15 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(str(static_dir / "index.html"))
+        html_path = static_dir / "index.html"
+        html = html_path.read_text()
+        api_key = _get_api_key() or ""
+        if api_key:
+            html = html.replace(
+                "<script>",
+                f"<script>\nwindow.__KCS_API_KEY = {__import__('json').dumps(api_key)};",
+            )
+        return HTMLResponse(html)
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
@@ -75,6 +93,28 @@ def create_app() -> FastAPI:
             duration,
         )
         return response
+
+    @app.middleware("http")
+    async def auth(request: Request, call_next):
+        api_key = _get_api_key()
+        # No auth configured — allow all
+        if not api_key:
+            return await call_next(request)
+
+        # Allow static files and docs without auth
+        path = request.url.path
+        if path == "/" or path.startswith("/static") or path in ("/docs", "/redoc", "/openapi.json"):
+            return await call_next(request)
+
+        # Require Authorization header
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header == f"Bearer {api_key}":
+            return await call_next(request)
+
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Unauthorized — use Authorization: Bearer <key>"},
+        )
 
     # Register routers
     app.include_router(system_router)
