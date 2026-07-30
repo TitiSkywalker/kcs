@@ -142,15 +142,13 @@ def build(path: str, tag: str, no_push: bool) -> None:
 @click.option(
     "--container", "-c", required=True, help="Target container for all commands"
 )
-@click.option("--host", default="127.0.0.1", help="Proxy listen address")
-@click.option("--port", default=9876, type=int, help="Proxy listen port")
 @click.option("--session", "-s", default="", help="Session label (for multiple proxies per container)")
 @click.option("--verbose", "-v", is_flag=True, help="Log every command to stderr")
 @click.pass_context
 def shell_proxy(
-    ctx: click.Context, container: str, host: str, port: int, session: str, verbose: bool
+    ctx: click.Context, container: str, session: str, verbose: bool
 ) -> None:
-    """Start a shell proxy server for CLAUDE_CODE_SHELL integration.
+    """Start a shell proxy via the API server (Unix domain socket).
 
     Auto-creates wrapper at ~/.local/bin/kcs-bash-<container>[-<session>].
 
@@ -165,13 +163,20 @@ def shell_proxy(
     \b
     Multiple sessions per container:
          kcs -P 8888 shell-proxy -c web -s alice
-         kcs -P 8888 shell-proxy -c web -s bob --port 9877
+         kcs -P 8888 shell-proxy -c web -s bob
     """
-    from kcs.shell_proxy import run_server
-
-    api_port = ctx.obj.get("port", 8000)
-    run_server(container, host=host, port=port, verbose=verbose, session=session,
-               api_port=api_port)
+    result = _api(
+        "/shell-proxy/start",
+        method="POST",
+        json_data={"container": container, "session": session},
+    )
+    wrapper = result.get("wrapper", "")
+    sock = result.get("sock", "")
+    console.print(f"[green]✓[/] Shell proxy started")
+    console.print(f"  Socket: {sock}")
+    console.print(f"  Wrapper: {wrapper}")
+    console.print()
+    console.print(f"  CLAUDE_CODE_SHELL={wrapper} claude")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

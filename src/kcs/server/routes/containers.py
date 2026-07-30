@@ -132,7 +132,7 @@ def remove_container(name: str, force: bool = Query(default=False)):
         for p in shell_proxy.list_running():
             if p["container"] == name:
                 try:
-                    shell_proxy.stop(p["port"])
+                    shell_proxy.stop(p["container"], p.get("session", ""))
                 except Exception:
                     pass
         return {"message": f"Container '{name}' removed"}

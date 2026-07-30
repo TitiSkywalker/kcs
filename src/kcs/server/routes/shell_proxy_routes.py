@@ -12,15 +12,13 @@ router = APIRouter(tags=["Shell Proxy"])
 
 class ShellProxyStartRequest(BaseModel):
     container: str
-    port: int = 9876
-    host: str = "127.0.0.1"
     session: str = ""
 
 
 @router.get(
     "/api/v1/shell-proxy",
     summary="List running shell proxies",
-    response_description="Active shell proxy ports and containers.",
+    response_description="Active shell proxy sockets and containers.",
 )
 def list_proxies():
     return {"proxies": shell_proxy.list_running()}
@@ -30,10 +28,10 @@ def list_proxies():
     "/api/v1/shell-proxy/start",
     status_code=201,
     summary="Start a shell proxy",
-    description="Launch a shell proxy on the given port, forwarding commands into the target container.",
+    description="Launch a shell proxy on a Unix domain socket, forwarding commands into the target container.",
     responses={
         201: {"description": "Shell proxy started"},
-        409: {"description": "Port already in use"},
+        409: {"description": "Proxy already running for this container/session"},
         500: {"description": "No running pod or other startup error"},
     },
 )
@@ -41,8 +39,6 @@ def start_proxy(req: ShellProxyStartRequest):
     try:
         result = shell_proxy.start(
             container=req.container,
-            host=req.host,
-            port=req.port,
             session=req.session,
         )
     except RuntimeError as e:
@@ -58,15 +54,19 @@ def start_proxy(req: ShellProxyStartRequest):
 @router.post(
     "/api/v1/shell-proxy/stop",
     summary="Stop a shell proxy",
-    description="Shut down the shell proxy on the given port.",
+    description="Shut down the shell proxy for the given container and session.",
     responses={
         200: {"description": "Shell proxy stopped"},
-        404: {"description": "No shell proxy on that port"},
+        404: {"description": "No shell proxy for that container/session"},
     },
 )
-def stop_proxy(port: int = Query(..., description="Port of the proxy to stop")):
+def stop_proxy(
+    container: str = Query(..., description="Container name"),
+    session: str = Query(default="", description="Session label"),
+):
     try:
-        shell_proxy.stop(port)
+        shell_proxy.stop(container, session)
     except RuntimeError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return {"message": f"Shell proxy on port {port} stopped"}
+    label = f"{container}/{session}" if session else container
+    return {"message": f"Shell proxy for {label} stopped"}

@@ -1,4 +1,4 @@
-"""Shell proxy tests — wrapper generation, TCP server, API management."""
+"""Shell proxy tests — wrapper generation, Unix socket, API management."""
 
 import json
 import os
@@ -10,11 +10,10 @@ import time
 import pytest
 import requests
 
-from kcs.shell_proxy import _ensure_wrapper, _wrapper_path
+from kcs.shell_proxy import _ensure_wrapper, _socket_path, _wrapper_path
 
 _NAME = "kcs-test-shell-proxy"
-_PORT_API = 19876
-_PORT_FWD = 19877
+_PORT_FWD = 19877  # unused with Unix sockets, kept for wrapper path uniqueness
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -49,8 +48,9 @@ def proxy_target(api):
     yield _NAME
 
     # Clean up
-    requests.post(f"{api}/shell-proxy/stop?port={_PORT_API}")
-    requests.post(f"{api}/shell-proxy/stop?port={_PORT_FWD}")
+    requests.post(f"{api}/shell-proxy/stop?container={_NAME}&session=api")
+    requests.post(f"{api}/shell-proxy/stop?container={_NAME}&session=fwd")
+    requests.post(f"{api}/shell-proxy/stop?container={_NAME}")
     requests.delete(f"{api}/containers/{_NAME}?force=true")
 
 
@@ -67,20 +67,23 @@ def test_wrapper_path_contains_bash():
 
 def test_wrapper_is_valid_bash():
     """The wrapper must pass bash -n (syntax check)."""
-    path = _ensure_wrapper("test-container", 19999)
+    sock = _socket_path("test-unit")
+    path = _ensure_wrapper("test-unit", sock)
     result = subprocess.run(["bash", "-n", path], capture_output=True, text=True)
     assert result.returncode == 0, f"bash syntax error: {result.stderr}"
 
 
 def test_wrapper_executable():
     """The wrapper must be +x."""
-    path = _ensure_wrapper("test-container", 19999)
+    sock = _socket_path("test-unit")
+    path = _ensure_wrapper("test-unit", sock)
     assert os.access(path, os.X_OK), f"not executable: {path}"
 
 
 def test_wrapper_shebang_is_bash():
     """CLAUDE_CODE_SHELL requires a bash shebang."""
-    path = _ensure_wrapper("test-container", 19999)
+    sock = _socket_path("test-unit")
+    path = _ensure_wrapper("test-unit", sock)
     with open(path) as f:
         line = f.readline()
     assert line.startswith("#!/bin/bash"), f"bad shebang: {line.strip()}"
@@ -88,23 +91,20 @@ def test_wrapper_shebang_is_bash():
 
 def test_wrapper_idempotent():
     """Calling _ensure_wrapper twice returns the same path."""
-    a = _ensure_wrapper("test-container", 19999)
-    b = _ensure_wrapper("test-container", 19999)
+    sock = _socket_path("test-unit")
+    a = _ensure_wrapper("test-unit", sock)
+    b = _ensure_wrapper("test-unit", sock)
     assert a == b
 
 
-def test_wrapper_fallback_local():
-    """Commands without 'eval' are forwarded to the proxy."""
-    wrapper = _ensure_wrapper("test-container", 19999)
-    proc = subprocess.run(
-        [wrapper, "-c", "echo NON_EVAL_FORWARDED"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    # No proxy on 19999 → connection refused (expected, not a local fallback)
-    assert proc.returncode != 0
-    assert "Connection refused" in proc.stderr
+def test_wrapper_uses_unix_socket():
+    """The wrapper template uses AF_UNIX, not TCP."""
+    sock = _socket_path("test-unit")
+    path = _ensure_wrapper("test-unit", sock)
+    with open(path) as f:
+        content = f.read()
+    assert "AF_UNIX" in content, "wrapper must use Unix domain socket"
+    assert "create_connection" not in content, "wrapper must not use TCP"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -118,44 +118,50 @@ class TestShellProxyAPI:
     def test_start_and_list(self, api, proxy_target):
         r = requests.post(
             f"{api}/shell-proxy/start",
-            json={"container": proxy_target, "port": _PORT_API},
+            json={"container": proxy_target, "session": "api"},
         )
         assert r.status_code == 201, r.text
         result = r.json()
-        assert result["port"] == _PORT_API
         assert result["container"] == proxy_target
         assert "wrapper" in result
+        assert "sock" in result
 
         r = requests.get(f"{api}/shell-proxy")
-        assert any(p["port"] == _PORT_API for p in r.json()["proxies"])
+        assert any(p["container"] == proxy_target and p["session"] == "api" for p in r.json()["proxies"])
 
-    def test_port_already_in_use(self, api, proxy_target):
+    def test_already_running(self, api, proxy_target):
         r = requests.post(
             f"{api}/shell-proxy/start",
-            json={"container": proxy_target, "port": _PORT_API},
+            json={"container": proxy_target, "session": "api"},
         )
         assert r.status_code == 409, r.text
 
     def test_stop_and_list(self, api, proxy_target):
-        r = requests.post(f"{api}/shell-proxy/stop?port={_PORT_API}")
+        r = requests.post(f"{api}/shell-proxy/stop?container={proxy_target}&session=api")
         assert r.status_code == 200
 
         r = requests.get(f"{api}/shell-proxy")
-        assert not any(p["port"] == _PORT_API for p in r.json()["proxies"])
+        assert not any(p["container"] == proxy_target and p["session"] == "api" for p in r.json()["proxies"])
 
     def test_stop_nonexistent(self, api):
-        r = requests.post(f"{api}/shell-proxy/stop?port=19998")
+        r = requests.post(f"{api}/shell-proxy/stop?container=nonexistent&session=none")
         assert r.status_code == 404
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Integration — TCP + wrapper forwarding
+# Integration — Unix socket + wrapper forwarding
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 def _invoke_wrapper(command, cwd_file=None):
-    """Run the wrapper with a simulated Claude Code command."""
-    wrapper = _ensure_wrapper("test-container", _PORT_FWD)
+    """Run the wrapper with a simulated Claude Code command.
+
+    Uses the wrapper created by the API start call (which has the correct socket path).
+    """
+    wrapper = _wrapper_path(_NAME, "fwd")
+    # Only create if missing (avoid overwriting the API-created one)
+    if not os.path.exists(wrapper):
+        _ensure_wrapper(_NAME, _socket_path(_NAME, "fwd"), "fwd")
     cmd = command
     if cwd_file:
         cmd = f"source /tmp/fake 2>/dev/null || true && eval '{command}' < /dev/null && pwd -P >| {cwd_file}"
@@ -168,13 +174,13 @@ def _invoke_wrapper(command, cwd_file=None):
 
 
 class TestWrapperForwarding:
-    """Wrapper → TCP proxy → container round-trip."""
+    """Wrapper → Unix socket → container round-trip."""
 
     def test_forward_eval(self, api, proxy_target):
         """eval'd command is forwarded via the proxy."""
         r = requests.post(
             f"{api}/shell-proxy/start",
-            json={"container": proxy_target, "port": _PORT_FWD},
+            json={"container": proxy_target, "session": "fwd"},
         )
         assert r.status_code == 201, r.text
         time.sleep(1)
@@ -197,11 +203,14 @@ class TestWrapperForwarding:
         proc = _invoke_wrapper("exit 42")
         assert proc.returncode == 42
 
-    def test_direct_tcp(self, api, proxy_target):
-        """Raw TCP connection to the proxy works."""
+    def test_direct_socket(self, api, proxy_target):
+        """Raw Unix socket connection to the proxy works."""
         try:
-            sock = socket.create_connection(("127.0.0.1", _PORT_FWD), timeout=10)
-            sock.sendall(b"echo tcp-direct\n")
+            sock_path = _socket_path(proxy_target, "fwd")
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect(sock_path)
+            sock.sendall(b"echo socket-direct\n")
             data = b""
             while True:
                 chunk = sock.recv(4096)
@@ -210,7 +219,7 @@ class TestWrapperForwarding:
                 data += chunk
             sock.close()
             result = json.loads(data.decode())
-            assert "tcp-direct" in result["stdout"]
+            assert "socket-direct" in result["stdout"]
             assert result["exit_code"] == 0
         finally:
-            requests.post(f"{api}/shell-proxy/stop?port={_PORT_FWD}")
+            requests.post(f"{api}/shell-proxy/stop?container={proxy_target}&session=fwd")

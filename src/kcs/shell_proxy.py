@@ -217,7 +217,7 @@ def _get_namespace(kubeconfig: str | None = None) -> str:
 
 _WRAPPER_TEMPLATE = r"""#!/bin/bash
 # kcs-bash-__CONTAINER__ — forwards Claude Code bash commands to kcs container.
-# Auto-generated, port __PORT__, container __CONTAINER__.
+# Auto-generated, socket __SOCK__, container __CONTAINER__.
 
 case "$(basename "$0")" in
 bash|kcs-bash-*)
@@ -233,12 +233,13 @@ cmd="${@: -1}"
 exec python3 - "$@" << 'PYEOF'
 import json, os, re, socket, subprocess, sys
 
-_HOST = "127.0.0.1"
-_PORT = __PORT__
+_SOCK = "__SOCK__"
 
 
 def _rpc(command):
-    sock = socket.create_connection((_HOST, _PORT), timeout=130)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(130)
+    sock.connect(_SOCK)
     sock.sendall((command + "\n").encode("utf-8"))
     data = b""
     while True:
@@ -308,12 +309,22 @@ def _wrapper_path(container: str, session: str = "") -> str:
     return os.path.join(base, name)
 
 
-def _ensure_wrapper(container: str, port: int, session: str = "") -> str:
+def _socket_path(container: str, session: str = "") -> str:
+    """Unix domain socket path: ~/.kcs/proxy-<container>[-<session>].sock."""
+    base = os.path.expanduser("~/.kcs")
+    os.makedirs(base, exist_ok=True)
+    name = f"proxy-{container}"
+    if session:
+        name += f"-{session}"
+    return os.path.join(base, f"{name}.sock")
+
+
+def _ensure_wrapper(container: str, sock_path: str, session: str = "") -> str:
     """Create (or refresh) the self-contained bash wrapper.  Returns its path."""
     bash_path = _wrapper_path(container, session)
     label = f"{container}/{session}" if session else container
     content = _WRAPPER_TEMPLATE.replace("__CONTAINER__", label).replace(
-        "__PORT__", str(port)
+        "__SOCK__", sock_path
     )
     try:
         with open(bash_path) as f:
@@ -332,7 +343,7 @@ def _ensure_wrapper(container: str, port: int, session: str = "") -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _try_register_with_api(container: str, host: str, port: int, api_port: int = 8000) -> None:
+def _try_register_with_api(container: str, sock_path: str, session: str, api_port: int = 8000) -> None:
     """Notify the local kcs API server about this proxy (best-effort)."""
     api_port = int(os.environ.get("KCS_PORT", str(api_port)))
     api_base = os.environ.get("KCS_API", f"http://localhost:{api_port}/api/v1")
@@ -340,20 +351,23 @@ def _try_register_with_api(container: str, host: str, port: int, api_port: int =
         import requests
         requests.post(
             f"{api_base}/shell-proxy/start",
-            json={"container": container, "host": host, "port": port},
+            json={"container": container, "session": session},
             timeout=2,
         )
     except Exception:
         pass
 
 
-def _try_unregister_with_api(port: int, api_port: int = 8000) -> None:
+def _try_unregister_with_api(container: str, session: str, api_port: int = 8000) -> None:
     """Tell the local kcs API server this proxy is shutting down (best-effort)."""
     api_port = int(os.environ.get("KCS_PORT", str(api_port)))
     api_base = os.environ.get("KCS_API", f"http://localhost:{api_port}/api/v1")
     try:
         import requests
-        requests.post(f"{api_base}/shell-proxy/stop?port={port}", timeout=2)
+        requests.post(
+            f"{api_base}/shell-proxy/stop?container={container}&session={session}",
+            timeout=2,
+        )
     except Exception:
         pass
 
@@ -366,7 +380,7 @@ def run_server(
     session: str = "",
     api_port: int = 8000,
 ) -> None:
-    """Start the shell proxy TCP server (blocking — for CLI use).
+    """Start the shell proxy Unix socket server (blocking — for CLI use).
 
     Registers with the API server at *api_port* so the dashboard discovers it.
     """
@@ -382,26 +396,30 @@ def run_server(
     namespace = _get_namespace(kubeconfig)
     print(f"Opening shell to {container}/{pod} (ns={namespace})...", file=sys.stderr)
 
+    sock_path = _socket_path(container, session)
     session_obj = ShellSession(pod, namespace, kubeconfig)
-    wrapper = _ensure_wrapper(container, port, session)
+    wrapper = _ensure_wrapper(container, sock_path, session)
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        server.bind((host, port))
+        os.unlink(sock_path)
     except OSError:
-        print(f"Error: port {port} already in use", file=sys.stderr)
+        pass
+    try:
+        server.bind(sock_path)
+    except OSError:
+        print(f"Error: cannot bind to {sock_path}", file=sys.stderr)
         sys.exit(1)
-
+    os.chmod(sock_path, 0o600)
     server.listen(5)
 
-    print(f"Shell proxy listening on {host}:{port}", file=sys.stderr)
+    print(f"Shell proxy listening on {sock_path}", file=sys.stderr)
     print(f"Wrapper: {wrapper}", file=sys.stderr)
     print(f"", file=sys.stderr)
     print(f"  CLAUDE_CODE_SHELL={wrapper} claude", file=sys.stderr)
 
     # Register with the local API server so the dashboard can discover this proxy
-    _try_register_with_api(container, host, port, api_port)
+    _try_register_with_api(container, sock_path, session, api_port)
 
     if verbose:
         print(f"  [verbose] logging every command to stderr", file=sys.stderr)
@@ -443,23 +461,27 @@ def run_server(
 
     try:
         while True:
-            conn, addr = server.accept()
+            conn, _addr = server.accept()
             t = threading.Thread(target=handle, args=(conn,), daemon=True)
             t.start()
     except KeyboardInterrupt:
         pass
     finally:
         print("\nClosing shell session...", file=sys.stderr)
-        _try_unregister_with_api(port, api_port)
+        _try_unregister_with_api(container, session, api_port)
         session_obj.close()
         server.close()
+        try:
+            os.unlink(sock_path)
+        except OSError:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # In-process management
 # ══════════════════════════════════════════════════════════════════════════════
 
-_running: dict[int, dict] = {}
+_running: dict[tuple, dict] = {}
 
 
 def start(
@@ -469,9 +491,10 @@ def start(
     verbose: bool = False,
     session: str = "",
 ) -> dict:
-    """Start a shell proxy in a background thread.  Returns {port, wrapper}."""
-    if port in _running:
-        raise RuntimeError(f"Shell proxy already running on port {port}")
+    """Start a shell proxy in a background thread.  Returns {sock, wrapper}."""
+    key = (container, session)
+    if key in _running:
+        raise RuntimeError(f"Shell proxy already running for {container}/{session}")
 
     kubeconfig = os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kcs/k3s.yaml")
     if not os.path.exists(kubeconfig):
@@ -482,25 +505,27 @@ def start(
         raise RuntimeError(f"No running pod for container '{container}'")
 
     namespace = _get_namespace(kubeconfig)
-    wrapper = _ensure_wrapper(container, port, session)
+    sock_path = _socket_path(container, session)
+    wrapper = _ensure_wrapper(container, sock_path, session)
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        server.bind((host, port))
+        os.unlink(sock_path)
     except OSError:
-        # Port already in use — register externally-started proxy
-        _running[port] = {"container": container, "host": host}
-        return {"port": port, "wrapper": wrapper, "container": container}
+        pass
+    try:
+        server.bind(sock_path)
+    except OSError:
+        raise RuntimeError(f"Cannot bind to {sock_path}")
+    os.chmod(sock_path, 0o600)
     server.listen(5)
     shell_sess = ShellSession(pod, namespace, kubeconfig)
 
     if verbose:
         log.info(
-            "[shell-proxy:%s] listening on %s:%s, wrapper=%s",
+            "[shell-proxy:%s] listening on %s, wrapper=%s",
             container,
-            host,
-            port,
+            sock_path,
             wrapper,
         )
 
@@ -521,46 +546,57 @@ def start(
     t = threading.Thread(target=_serve, daemon=True)
     t.start()
 
-    # Wait until the port is accepting connections
+    # Wait until the socket is accepting connections
     deadline = time.time() + 10
     while time.time() < deadline:
         try:
-            s = socket.create_connection((host, port), timeout=0.5)
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(sock_path)
             s.close()
             break
         except (OSError, ConnectionRefusedError):
             time.sleep(0.2)
 
-    _running[port] = {
+    _running[key] = {
         "container": container,
-        "host": host,
         "thread": t,
         "server": server,
         "session": session,
+        "sock": sock_path,
     }
-    return {"port": port, "wrapper": wrapper, "container": container}
+    return {"sock": sock_path, "wrapper": wrapper, "container": container}
 
 
-def stop(port: int) -> None:
+def stop(container: str, session: str = "") -> None:
     """Stop a background shell proxy."""
-    entry = _running.pop(port, None)
+    key = (container, session)
+    entry = _running.pop(key, None)
     if entry is None:
-        raise RuntimeError(f"No shell proxy on port {port}")
+        raise RuntimeError(f"No shell proxy for {container}/{session}")
     server = entry.get("server")
     thread = entry.get("thread")
     if server:
         server.close()
     if thread:
         thread.join(timeout=5)
-    if server:
+    sock_path = entry.get("sock")
+    if sock_path:
+        # Give it a moment, then clean up the socket file
         deadline = time.time() + 5
         while time.time() < deadline:
             try:
-                s = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(0.2)
+                s.connect(sock_path)
                 s.close()
             except (OSError, ConnectionRefusedError):
                 break
             time.sleep(0.5)
+        try:
+            os.unlink(sock_path)
+        except OSError:
+            pass
 
 
 def list_running() -> list[dict]:
@@ -568,17 +604,16 @@ def list_running() -> list[dict]:
     return [
         {
             "container": e["container"],
-            "port": p,
-            "host": e["host"],
             "session": e.get("session", ""),
+            "sock": e["sock"],
             "wrapper": _wrapper_path(e["container"], e.get("session", "")),
         }
-        for p, e in _running.items()
+        for _key, e in _running.items()
     ]
 
 
 def _handle_conn(session: ShellSession, conn: socket.socket) -> None:
-    """Handle one TCP client connection."""
+    """Handle one Unix socket client connection."""
     try:
         conn.settimeout(130)
         data = b""

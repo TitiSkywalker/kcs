@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from kcs import __version__
@@ -70,15 +70,7 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def index():
-        html_path = static_dir / "index.html"
-        html = html_path.read_text()
-        api_key = _get_api_key() or ""
-        if api_key:
-            html = html.replace(
-                "<script>",
-                f"<script>\nwindow.__KCS_API_KEY = {__import__('json').dumps(api_key)};",
-            )
-        return HTMLResponse(html)
+        return FileResponse(str(static_dir / "index.html"))
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
