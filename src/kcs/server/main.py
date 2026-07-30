@@ -56,6 +56,16 @@ def main():
         default=os.environ.get("KCS_API_KEY"),
         help="API authentication key (env: KCS_API_KEY)",
     )
+    parser.add_argument(
+        "--ssl-certfile",
+        default=os.environ.get("KCS_SSL_CERT"),
+        help="TLS certificate file (env: KCS_SSL_CERT)",
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        default=os.environ.get("KCS_SSL_KEY"),
+        help="TLS private key file (env: KCS_SSL_KEY)",
+    )
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
@@ -75,60 +85,72 @@ def main():
         logging.getLogger().addHandler(fh)
         log.info("Logging to %s", args.log_file)
 
-    if args.config:
-        log.info("Loading config: %s", args.config)
-        try:
-            svc = get_service()
-            config = svc.load_config_file(args.config)
+    if not args.config:
+        print("Error: --config <file> is required", file=sys.stderr)
+        print("  kcs serve --config cluster.toml", file=sys.stderr)
+        sys.exit(1)
 
-            if not config.sudo_password:
-                print()
-                print("  sudo access is needed on this machine to:")
-                print(
-                    "    • read the k3s server token (/var/lib/rancher/k3s/server/token)"
-                )
-                print(
-                    "    • configure the container registry (/etc/rancher/k3s/registries.yaml)"
-                )
-                print("    • manage NFS (if enabled)")
-                print()
-                import getpass
+    log.info("Loading config: %s", args.config)
+    try:
+        svc = get_service()
+        config = svc.load_config_file(args.config)
 
-                pw = getpass.getpass("  local sudo password: ")
-                if pw:
-                    config.sudo_password = pw
-                print()
+        # CLI flag / env var overrides config file
+        if args.api_key:
+            config.api_key = args.api_key
 
-            # CLI flag / env var overrides config file
-            if args.api_key:
-                config.api_key = args.api_key
-
-            set_service_config(config)
-            results = svc.apply_config()
-            for r in results:
-                log.info("  %s", r)
-
-            if not args.no_nfs:
-                log.info("Setting up NFS...")
-                try:
-                    nfs_result = svc.setup_nfs()
-                    log.info("NFS: %s", nfs_result.get("message"))
-                    for r in nfs_result.get("results", []):
-                        log.info("  %s", r)
-                except Exception as e:
-                    log.warning("NFS setup skipped: %s", e)
-
-            # Wipe sudo password from memory — no longer needed
-            config.sudo_password = None
-        except Exception as e:
-            log.error("  %s", e)
+        if not config.api_key:
+            print(
+                "Error: api_key is required. Set it in the config file or via --api-key / KCS_API_KEY.",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
-        log.info("Checking cluster health...")
-        get_service().repair()
-    elif args.api_key:
-        # Auth key set but no config file — configure auth only
-        from kcs.server.models import ClusterConfig
-        set_service_config(ClusterConfig(api_key=args.api_key))
+        if not config.sudo_password:
+            print()
+            print("  sudo access is needed on this machine to:")
+            print(
+                "    • read the k3s server token (/var/lib/rancher/k3s/server/token)"
+            )
+            print(
+                "    • configure the container registry (/etc/rancher/k3s/registries.yaml)"
+            )
+            print("    • manage NFS (if enabled)")
+            print()
+            import getpass
 
-    uvicorn.run("kcs.server:app", host=args.host, port=args.port, reload=False)
+            pw = getpass.getpass("  local sudo password: ")
+            if pw:
+                config.sudo_password = pw
+            print()
+
+        set_service_config(config)
+        results = svc.apply_config()
+        for r in results:
+            log.info("  %s", r)
+
+        if not args.no_nfs:
+            log.info("Setting up NFS...")
+            try:
+                nfs_result = svc.setup_nfs()
+                log.info("NFS: %s", nfs_result.get("message"))
+                for r in nfs_result.get("results", []):
+                    log.info("  %s", r)
+            except Exception as e:
+                log.warning("NFS setup skipped: %s", e)
+
+        # Wipe sudo password from memory — no longer needed
+        config.sudo_password = None
+    except Exception as e:
+        log.error("  %s", e)
+        sys.exit(1)
+
+    log.info("Checking cluster health...")
+    get_service().repair()
+
+    uvicorn_kwargs = {"host": args.host, "port": args.port, "reload": False}
+    if args.ssl_certfile and args.ssl_keyfile:
+        uvicorn_kwargs["ssl_certfile"] = args.ssl_certfile
+        uvicorn_kwargs["ssl_keyfile"] = args.ssl_keyfile
+        log.info("TLS enabled: %s", args.ssl_certfile)
+    uvicorn.run("kcs.server:app", **uvicorn_kwargs)

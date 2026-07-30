@@ -215,7 +215,7 @@ def scale_container(name: str, req: ScaleRequest):
 def container_logs(
     name: str,
     follow: bool = Query(default=False),
-    tail: int = Query(default=100),
+    tail: int = Query(default=100, ge=1, le=10000),
     pod: int | None = Query(default=None),
 ):
     """Retrieve stdout/stderr logs."""
@@ -345,6 +345,23 @@ import uuid
 
 _sessions: dict[str, "ShellSession"] = {}
 _sessions_lock = threading.Lock()
+_sessions_at: dict[str, float] = {}  # last-access timestamp
+_SESSION_TTL = 1800  # 30 min idle timeout
+
+
+def _purge_stale_sessions() -> None:
+    """Remove sessions idle for longer than TTL."""
+    now = time.time()
+    with _sessions_lock:
+        stale = [sid for sid, ts in list(_sessions_at.items()) if now - ts > _SESSION_TTL]
+        for sid in stale:
+            sess = _sessions.pop(sid, None)
+            if sess:
+                try:
+                    sess.close()
+                except Exception:
+                    pass
+            _sessions_at.pop(sid, None)
 
 
 class ShellSession:
@@ -496,7 +513,9 @@ def shell_session_create(name: str, pod: int | None = Query(default=None)):
     sid = uuid.uuid4().hex[:12]
 
     with _sessions_lock:
+        _purge_stale_sessions()
         _sessions[sid] = session
+        _sessions_at[sid] = time.time()
 
     return {"session_id": sid, "pod": pod_name}
 
@@ -521,6 +540,9 @@ def shell_session_exec(name: str, sid: str, req: ExecRequest):
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
+        # Bump last-access time for idle timeout
+        with _sessions_lock:
+            _sessions_at[sid] = time.time()
         result = session.exec(shlex.join(req.command))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -538,6 +560,7 @@ def shell_session_close(name: str, sid: str):
     """Close a shell session."""
     with _sessions_lock:
         session = _sessions.pop(sid, None)
+        _sessions_at.pop(sid, None)
     if session:
         session.close()
     return {"message": "Session closed"}
