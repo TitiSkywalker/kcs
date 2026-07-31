@@ -898,11 +898,13 @@ class KCSClient:
                         "cpu": float(_cpu_cores(capacity.get("cpu", "0"))),
                         "memory": _mem_bytes(capacity.get("memory", "0")),
                         "gpu": int(capacity.get("nvidia.com/gpu", 0)),
+                        "storage": _mem_bytes(capacity.get("ephemeral-storage", "0")),
                     },
                     "allocatable": {
                         "cpu": float(_cpu_cores(allocatable.get("cpu", "0"))),
                         "memory": _mem_bytes(allocatable.get("memory", "0")),
                         "gpu": int(allocatable.get("nvidia.com/gpu", 0)),
+                        "storage": _mem_bytes(allocatable.get("ephemeral-storage", "0")),
                     },
                     "used": usage.get(
                         n.metadata.name, {"cpu": 0, "memory": 0, "gpu": 0}

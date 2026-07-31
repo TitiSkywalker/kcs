@@ -92,6 +92,7 @@ def cluster_status():
                 "age": c["age"],
                 "node": pod_node,
                 "resources": c.get("resources", {}),
+                "ports": c.get("ports", []),
             }
         )
 
@@ -106,6 +107,12 @@ def cluster_status():
             "disk_pressure": (
                 server_node.get("disk_pressure", False) if server_node else False
             ),
+            "memory_pressure": (
+                server_node.get("memory_pressure", False) if server_node else False
+            ),
+            "pid_pressure": (
+                server_node.get("pid_pressure", False) if server_node else False
+            ),
             "taints": server_node.get("taints", []) if server_node else [],
         },
         "workers": [
@@ -117,6 +124,8 @@ def cluster_status():
                 "allocatable": w.get("allocatable", {}),
                 "used": w.get("used", {}),
                 "disk_pressure": w.get("disk_pressure", False),
+                "memory_pressure": w.get("memory_pressure", False),
+                "pid_pressure": w.get("pid_pressure", False),
                 "taints": w.get("taints", []),
             }
             for w in workers
