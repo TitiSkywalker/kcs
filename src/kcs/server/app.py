@@ -18,6 +18,7 @@ from kcs.server.routes import (
     clusters_router,
     containers_router,
     shell_proxy_router,
+    shell_sessions_router,
     system_router,
 )
 
@@ -119,6 +120,7 @@ def create_app() -> FastAPI:
     app.include_router(containers_router)
     app.include_router(clusters_router)
     app.include_router(shell_proxy_router)
+    app.include_router(shell_sessions_router)
 
     return app
 

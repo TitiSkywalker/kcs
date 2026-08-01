@@ -3,6 +3,7 @@
 from kcs.server.routes.clusters import router as clusters_router
 from kcs.server.routes.containers import router as containers_router
 from kcs.server.routes.shell_proxy_routes import router as shell_proxy_router
+from kcs.server.routes.shell_sessions import router as shell_sessions_router
 from kcs.server.routes.system import router as system_router
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "clusters_router",
     "system_router",
     "shell_proxy_router",
+    "shell_sessions_router",
 ]

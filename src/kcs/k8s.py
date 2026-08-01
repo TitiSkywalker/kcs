@@ -485,13 +485,29 @@ class KCSClient:
         else:
             status = STATUS_RUNNING
 
-        # Get port info
+        # Get port info with real access addresses
         try:
             svc = self.core_v1.read_namespaced_service(
                 name=self.service_name(name), namespace=self.namespace
             )
+            cluster_ip = svc.spec.cluster_ip or ""
+            # Find the pod's actual node IP, not LB ingress
+            pod_node_ip = ""
+            try:
+                pods = self.list_pods(name)
+                if pods:
+                    pod_node_ip = pods[0].get("node", "")
+            except Exception:
+                pass
             ports = [
-                {"port": p.port, "target_port": p.target_port, "protocol": p.protocol}
+                {
+                    "port": p.port,
+                    "target_port": p.target_port,
+                    "protocol": p.protocol,
+                    "node_port": p.node_port,
+                    "cluster_ip": cluster_ip,
+                    "node_ip": pod_node_ip,
+                }
                 for p in (svc.spec.ports or [])
             ]
         except ApiException:

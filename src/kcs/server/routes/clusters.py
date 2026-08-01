@@ -24,20 +24,9 @@ log = logging.getLogger("kcs")
 router = APIRouter(tags=["Cluster"])
 
 
-@router.post(
-    "/api/v1/cluster/apply",
-    summary="Apply cluster configuration",
-    description="Declaratively configure the cluster. Accepts a full `ClusterConfig`:\n\n"
-    "- **backend**: currently only `k3s` is supported.\n"
-    "- **nfs_path**: server-side NFS export path.\n"
-    "- **workers**: list of `{host, user, password}` to join via SSH.\n\n"
-    "Workers already joined are skipped; workers removed from the config "
-    "are pruned from the cluster.",
-    response_description="Backend type and per-node join results.",
-    responses={400: {"description": "Unknown backend or missing k3s"}},
-)
+@router.post("/api/v1/cluster/apply", summary="Apply cluster configuration")
 def apply_cluster_config(req: ClusterConfig):
-    """Apply cluster config — ensure backend, join workers, prune stale nodes."""
+    """Declaratively configure the cluster — join workers, prune stale nodes."""
     svc = get_service()
     set_service_config(req)
 

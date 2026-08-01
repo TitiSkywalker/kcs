@@ -1,4 +1,4 @@
-"""Shell proxy management routes — start / stop / list shell proxies in-process."""
+"""Shell proxy management — start / stop / list Unix-socket proxies."""
 
 from __future__ import annotations
 
@@ -15,32 +15,17 @@ class ShellProxyStartRequest(BaseModel):
     session: str = ""
 
 
-@router.get(
-    "/api/v1/shell-proxy",
-    summary="List running shell proxies",
-    response_description="Active shell proxy sockets and containers.",
-)
+@router.get("/api/v1/shell-proxy", summary="List running shell proxies")
 def list_proxies():
     return {"proxies": shell_proxy.list_running()}
 
 
-@router.post(
-    "/api/v1/shell-proxy/start",
-    status_code=201,
-    summary="Start a shell proxy",
-    description="Launch a shell proxy on a Unix domain socket, forwarding commands into the target container.",
-    responses={
-        201: {"description": "Shell proxy started"},
-        409: {"description": "Proxy already running for this container/session"},
-        500: {"description": "No running pod or other startup error"},
-    },
-)
+@router.post("/api/v1/shell-proxy/start", status_code=201,
+    summary="Start a shell proxy")
 def start_proxy(req: ShellProxyStartRequest):
+    """Launch a Unix-socket proxy forwarding commands into a container."""
     try:
-        result = shell_proxy.start(
-            container=req.container,
-            session=req.session,
-        )
+        return shell_proxy.start(container=req.container, session=req.session)
     except RuntimeError as e:
         msg = str(e)
         if "already running" in msg.lower():
@@ -48,22 +33,14 @@ def start_proxy(req: ShellProxyStartRequest):
         raise HTTPException(status_code=500, detail=msg)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return result
 
 
-@router.post(
-    "/api/v1/shell-proxy/stop",
-    summary="Stop a shell proxy",
-    description="Shut down the shell proxy for the given container and session.",
-    responses={
-        200: {"description": "Shell proxy stopped"},
-        404: {"description": "No shell proxy for that container/session"},
-    },
-)
+@router.post("/api/v1/shell-proxy/stop", summary="Stop a shell proxy")
 def stop_proxy(
     container: str = Query(..., description="Container name"),
     session: str = Query(default="", description="Session label"),
 ):
+    """Shut down the shell proxy for the given container and session."""
     try:
         shell_proxy.stop(container, session)
     except RuntimeError as e:

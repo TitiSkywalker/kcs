@@ -20,11 +20,12 @@ window.showServer = function () {
     ${hwSection(server)}
     <h4>containers · ${containers.length}</h4>
     ${containers.length ? containers.map(c => `<div class="item" style="cursor:pointer" onclick="event.stopPropagation();showContainer('${c.name}')">
-      <span class="badge ${c.status}"></span><span style="flex:1">${c.name}</span>
+      <span class="badge ${c.status}"></span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${c.name}</span>
       <span class="mono">${c.image.split('/').pop()}</span>
       ${(c.ports || []).length ? `<span class="mono" style="font-size:9px;margin-left:0">:${c.ports.map(p => typeof p === 'string' ? p.split('/')[0].split(':')[0] : p.port).join(',')}</span>` : ''}
       <span class="mono" style="font-size:9px">@${c.node || '?'}</span>
-      <span class="item-acts">${containerActs(c)}
+      <span class="item-acts">
+        ${containerActs(c)}
         <button onclick="event.stopPropagation();doDelete('${c.name}')" class="danger" title="delete">✕</button>
       </span>
     </div>`).join('') : '<div class="empty">no containers</div>'}
@@ -57,11 +58,12 @@ window.showWorker = function (i) {
     ${hwSection(w)}
     <h4>containers · ${pods.length}</h4>
     ${pods.length ? pods.map(c => `<div class="item" style="cursor:pointer" onclick="event.stopPropagation();showContainer('${c.name}')">
-      <span class="badge ${c.status}"></span><span style="flex:1">${c.name}</span>
+      <span class="badge ${c.status}"></span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${c.name}</span>
       <span class="mono">${c.image.split('/').pop()}</span>
       ${(c.ports || []).length ? `<span class="mono" style="font-size:9px;margin-left:0">:${c.ports.map(p => typeof p === 'string' ? p.split('/')[0].split(':')[0] : p.port).join(',')}</span>` : ''}
       <span class="mono" style="font-size:9px">@${c.node || '?'}</span>
-      <span class="item-acts">${containerActs(c)}
+      <span class="item-acts">
+        ${containerActs(c)}
         <button onclick="event.stopPropagation();doDelete('${c.name}')" class="danger" title="delete">✕</button>
       </span>
     </div>`).join('') : '<div class="empty">no containers on this node</div>'}`);
@@ -105,7 +107,16 @@ window.showContainer = async function (name) {
           const [ext, int = ext] = pp.split(':');
           return `<div class="item"><span>${ext}→${int}</span><span class="mono">${proto}</span></div>`;
         }
-        return `<div class="item"><span>${p.port}→${p.target_port}</span><span class="mono">${p.protocol}</span></div>`;
+        const addr = p.node_port && p.node_ip
+          ? `${p.node_ip}:${p.node_port}`
+          : (p.node_port ? `NodePort ${p.node_port}` : `ClusterIP ${p.cluster_ip}:${p.port}`);
+        return `<div class="item" style="flex-direction:column;align-items:flex-start;gap:2px">
+          <div style="display:flex;width:100%;justify-content:space-between">
+            <span>${p.port}→${p.target_port}</span>
+            <span class="mono">${p.protocol}</span>
+          </div>
+          <span class="mono" style="font-size:10px;color:var(--dim)">${addr}</span>
+        </div>`;
       }).join('');
     }
 
