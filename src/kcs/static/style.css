@@ -1,0 +1,169 @@
+  :root {
+    --bg:#fafaf8; --card:#fff; --text:#1f1f1d; --dim:#8c8a84;
+    --accent:#2d4b73; --green:#2d7d46; --red:#c23b3b; --amber:#b07820;
+    --border:#e8e6e1;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font:13px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+	 background:var(--bg); color:var(--text); min-height:100vh;
+	 display:flex; align-items:center; justify-content:center; }
+  .wrap { width:100%; max-width:900px; padding:40px 20px;
+	  transition:transform .25s ease; }
+  body.panel-open .wrap { transform:translateX(-150px); }
+
+  .logo { text-align:center; margin-bottom:6px; }
+  .logo span { font-size:13px; font-weight:600; letter-spacing:-.01em; color:var(--dim); }
+
+  .topo { display:flex; flex-direction:column; align-items:center; gap:0; position:relative; }
+  .lines { position:absolute; inset:0; pointer-events:none; z-index:0; }
+  .lines path { fill:none; stroke:var(--border); stroke-width:1; }
+  .card { position:relative; z-index:1; background:var(--card); border:1px solid var(--border); border-radius:10px;
+	  width:220px; padding:24px 20px 20px; cursor:pointer; text-align:center;
+	  transition:border-color .2s, box-shadow .2s; outline:none; }
+  .card:hover { border-color:#c4c0b8; box-shadow:0 2px 12px rgba(0,0,0,.05); }
+
+  .card .kind { font-size:9px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; margin-bottom:8px; }
+  .card .name { font-size:14px; font-weight:600; letter-spacing:-.01em; word-break:break-all; }
+  .card .ip { font-size:11px; color:var(--dim); font-family:"SF Mono","Fira Code","Consolas",monospace;
+	      margin-top:4px; }
+  .card .summary { font-size:11px; color:var(--dim); margin-top:10px; }
+
+  .card.server .kind { color:var(--accent); }
+  .card.active { border-color:var(--accent); box-shadow:0 2px 12px rgba(45,75,115,.12); }
+
+  .dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:4px; vertical-align:middle; }
+  .dot.on { background:var(--green); }
+  .dot.off { background:var(--red); }
+
+  .workers { display:flex; gap:16px; flex-wrap:wrap; justify-content:center;
+	      margin-top:32px; }
+
+  /* action bar */
+  .actions { text-align:center; margin-bottom:12px; }
+  .actions button { font:11px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+	            background:var(--card); border:1px solid var(--border); border-radius:6px;
+	            padding:5px 12px; cursor:pointer; color:var(--accent); font-weight:500;
+	            transition:border-color .2s; }
+  .actions button:hover { border-color:var(--accent); }
+
+  /* panel */
+  .panel { position:fixed; right:0; top:0; bottom:0; width:320px; background:var(--card);
+	   border-left:1px solid var(--border); z-index:10; overflow-y:auto;
+	   transform:translateX(100%); transition:transform .2s ease; }
+  .panel.show { transform:translateX(0); }
+  .panel .close { position:absolute; top:12px; right:12px; width:24px; height:24px;
+	          border:none; background:none; color:var(--dim); cursor:pointer;
+	          font-size:16px; border-radius:4px; display:flex; align-items:center;
+	          justify-content:center; }
+  .panel .close:hover { background:#f3f2ef; }
+  .panel .body { padding:24px 20px; }
+  .panel h3 { font-size:10px; font-weight:600; color:var(--dim); text-transform:uppercase;
+	      letter-spacing:.06em; margin-bottom:4px; }
+  .panel h4 { font-size:11px; font-weight:500; color:var(--dim); margin:18px 0 8px; }
+  .panel .node-name { font-size:18px; font-weight:600; letter-spacing:-.01em; }
+  .panel .node-ip { font-size:12px; color:var(--dim); margin:2px 0 12px;
+	            font-family:"SF Mono","Fira Code","Consolas",monospace; }
+  .panel .item { display:flex; align-items:center; gap:8px; padding:8px 10px;
+	         background:var(--bg); border:1px solid var(--border); border-radius:5px;
+	         margin-bottom:4px; font-size:12px; }
+  .panel .item .badge { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+  .panel .item .badge.running { background:var(--green); }
+  .panel .item .badge.pending { background:var(--amber); }
+  .panel .item .badge.terminating { background:var(--amber); animation:pulse 0.8s ease-in-out infinite alternate; }
+  .panel .item .badge.stopped { background:var(--red); }
+  .panel .mono { font-family:"SF Mono","Fira Code","Consolas",monospace; font-size:10px;
+	         color:var(--dim); margin-left:auto; }
+  .panel .pill { font-size:10px; padding:2px 8px; border-radius:8px; font-weight:500; margin-right:4px;
+	         display:inline-block; }
+  .panel .pill.ok { background:#eaf4ed; color:var(--green); }
+  .panel .pill.err { background:#fce8e8; color:var(--red); }
+  .panel .pill.info { background:#e8edf3; color:var(--accent); }
+  .panel .empty { text-align:center; color:var(--dim); padding:20px 0; font-size:12px; }
+
+  /* item actions */
+  .item-acts { display:flex; gap:2px; flex-shrink:0; }
+  .item-acts button { width:20px; height:20px; border:1px solid var(--border); border-radius:4px;
+	              background:var(--card); cursor:pointer; font-size:10px; line-height:1;
+	              padding:0; display:flex; align-items:center; justify-content:center;
+	              color:var(--dim); transition:border-color .15s, color .15s; }
+  .item-acts button:hover { border-color:var(--accent); color:var(--accent); }
+  .item-acts button.danger:hover { border-color:var(--red); color:var(--red); }
+
+  /* form */
+  .fld { margin-bottom:10px; }
+  .fld label { display:block; font-size:10px; font-weight:500; color:var(--dim);
+	       text-transform:uppercase; letter-spacing:.04em; margin-bottom:3px; }
+  .fld input { width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:5px;
+	       font:12px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+	       background:var(--bg); color:var(--text); outline:none; }
+  .fld input:focus { border-color:var(--accent); }
+  .fld-row { display:flex; gap:8px; }
+  .fld-row .fld { flex:1; }
+
+  .sep { height:1px; background:var(--border); margin:18px 0; }
+
+  .btn { display:block; width:100%; padding:7px 0; border:none; border-radius:6px;
+	 font:12px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+	 font-weight:500; cursor:pointer; transition:background .15s; }
+  .btn.primary { background:var(--accent); color:#fff; }
+  .btn.primary:hover { background:#1e3a5c; }
+  .btn.danger { background:transparent; color:var(--red); border:1px solid var(--border); margin-top:6px; }
+  .btn.danger:hover { background:#fce8e8; border-color:var(--red); }
+
+  .msg { text-align:center; font-size:11px; padding:8px; border-radius:5px; margin-top:8px; display:none; }
+  .msg.ok { display:block; background:#eaf4ed; color:var(--green); }
+  .msg.err { display:block; background:#fce8e8; color:var(--red); }
+
+  .hint { text-align:center; font-size:10px; color:#d0cec8; margin-top:28px; }
+
+  /* login overlay */
+  .login-overlay { position:fixed; inset:0; background:rgba(0,0,0,.3); z-index:100;
+                   display:flex; align-items:center; justify-content:center; }
+  .login-card { background:var(--card); border:1px solid var(--border); border-radius:10px;
+                padding:28px 24px; width:300px; text-align:center; }
+  .login-card h2 { font-size:15px; font-weight:600; margin-bottom:4px; }
+  .login-card p { font-size:11px; color:var(--dim); margin-bottom:14px; }
+  .login-card input { width:100%; padding:7px 10px; border:1px solid var(--border);
+                      border-radius:6px; font:13px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+                      background:var(--bg); color:var(--text); outline:none; margin-bottom:10px; }
+  .login-card input:focus { border-color:var(--accent); }
+  .login-card .btn { margin-top:0; }
+  .login-err { font-size:10px; color:var(--red); margin-top:4px; display:none; }
+
+  /* toast */
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); z-index:200;
+           background:#1f1f1d; color:#fff; font-size:12px; padding:8px 16px; border-radius:6px;
+           opacity:0; transition:opacity .2s; pointer-events:none; }
+  .toast.show { opacity:1; }
+
+  /* bars */
+  .bar { height:4px; background:#e8e6e1; border-radius:2px; position:relative; overflow:hidden; }
+  .bar-fill { position:absolute; left:0; top:0; height:100%; background:var(--accent);
+	      border-radius:2px; transition:width .5s ease; }
+  .bar.high .bar-fill { background:var(--amber); }
+  @keyframes pulse { from { opacity:1; } to { opacity:0.3; } }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes shimmer { 0% { background-position:-200px 0; } 100% { background-position:200px 0; } }
+
+  .refresh-btn { font-size:13px; background:var(--card); border:1px solid var(--border);
+    border-radius:6px; padding:5px 10px; cursor:pointer; color:var(--dim);
+    transition:border-color .2s, color .2s; margin-left:4px; }
+  .refresh-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .refresh-btn.spinning { animation:spin .6s linear; pointer-events:none; }
+
+  .loading { text-align:center; padding:60px 20px; color:var(--dim); }
+  .loading .skel { display:inline-block; width:220px; height:100px;
+    background:linear-gradient(90deg,var(--bg) 25%,var(--border) 50%,var(--bg) 75%);
+    background-size:200px 100%; animation:shimmer 1.5s ease-in-out infinite; border-radius:10px; }
+
+  .search-box { width:100%; padding:6px 8px 6px 26px; border:1px solid var(--border);
+    border-radius:6px; font:12px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+    background:var(--bg); color:var(--text); outline:none; margin-bottom:12px; }
+  .search-box:focus { border-color:var(--accent); }
+  .search-wrap { position:relative; }
+  .search-wrap::before { content:'\1F50D'; position:absolute; left:7px; top:5px; font-size:10px; opacity:.4; }
+
+  .item { animation:fadeIn .2s ease; }
+  .card { transition:border-color .2s, box-shadow .2s, transform .15s ease; }
+  .card:active { transform:scale(.98); }
